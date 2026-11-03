@@ -4,6 +4,8 @@ use tokio::sync::Semaphore;
 
 use crate::{Error, Result};
 
+const MAX_LIST_PAGE_SIZE: usize = 1000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
     max_queued_objects: NonZeroUsize,
@@ -23,6 +25,10 @@ impl TransferLimits {
 
     pub fn max_queued_objects(self) -> usize {
         self.max_queued_objects.get()
+    }
+
+    pub fn list_page_size(self) -> usize {
+        self.max_queued_objects().min(MAX_LIST_PAGE_SIZE)
     }
 
     pub fn max_ongoing_http_requests(self) -> usize {

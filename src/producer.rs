@@ -4,17 +4,23 @@ use tokio::sync::mpsc;
 
 use crate::{Error, ObjectTask, Result, TransferLimits};
 
-const MAX_LIST_PAGE_SIZE: usize = 1000;
-
 pub struct BucketProducer {
     source: Operator,
     sender: mpsc::Sender<ObjectTask>,
+    list_page_size: usize,
 }
 
 impl BucketProducer {
     pub fn new(source: Operator, limits: TransferLimits) -> (Self, mpsc::Receiver<ObjectTask>) {
         let (sender, receiver) = mpsc::channel(limits.max_queued_objects());
-        (Self { source, sender }, receiver)
+        (
+            Self {
+                source,
+                sender,
+                list_page_size: limits.list_page_size(),
+            },
+            receiver,
+        )
     }
 
     // Run alongside the consumer. Queue closure alone does not mean listing succeeded;
@@ -35,7 +41,7 @@ impl BucketProducer {
             .source
             .lister_with("/")
             .recursive(true)
-            .limit(self.sender.max_capacity().min(MAX_LIST_PAGE_SIZE))
+            .limit(self.list_page_size)
             .await?;
 
         loop {
