@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use futures_util::{poll, stream};
@@ -39,16 +40,17 @@ impl TestClient {
     }
 
     // Send a test request and return its unread body so tests control when the permit is released.
-    // Fail after five seconds if the request is blocked, rather than hanging the test.
     async fn fetch(&self) -> HttpBody {
-        timeout(
-            Duration::from_secs(5),
-            self.transport.fetch(Self::request()),
-        )
-        .await
-        .expect("request blocked")
-        .unwrap()
-        .into_body()
+        Self::finish_fetch(self.transport.fetch(Self::request())).await
+    }
+
+    // Bound request completion so a blocked request fails instead of hanging the test.
+    async fn finish_fetch(fetch: impl Future<Output = Result<Response<HttpBody>>>) -> HttpBody {
+        timeout(Duration::from_secs(5), fetch)
+            .await
+            .expect("request blocked")
+            .unwrap()
+            .into_body()
     }
 }
 
@@ -70,10 +72,7 @@ async fn source_and_destination_share_limit_until_body_eof() {
     drop(sender);
     assert_eq!(first.to_buffer().await.unwrap().to_vec(), b"data");
     // EOF releases capacity even while the exhausted body remains alive.
-    let _response = timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    let _response = TestClient::finish_fetch(waiting).await;
     assert!(destination.calls.try_recv().is_ok());
 }
 
