@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 pub enum Error {
     InvalidLimit { field: &'static str, value: usize },
     InvalidRoot,
+    InvalidConfig(&'static str),
     UnsupportedEntry(String),
     Storage(opendal::Error),
     ConsumerClosed,
@@ -29,6 +30,7 @@ impl fmt::Display for Error {
                     Semaphore::MAX_PERMITS
                 )
             }
+            Self::InvalidConfig(field) => write!(f, "invalid transfer configuration: {field}"),
             Self::InvalidRoot => write!(f, "operators must be rooted at the bucket root (/)"),
             Self::UnsupportedEntry(path) => write!(f, "unknown entry type: {path}"),
             Self::Storage(error) => write!(f, "storage operation failed: {error}"),

@@ -1,19 +1,19 @@
 use opendal::Operator;
 use opendal::layers::{RetryLayer, TimeoutLayer};
 
-use crate::config::{DEFAULT_MAX_RETRIES, DEFAULT_OPERATION_TIMEOUT, DEFAULT_RETRY_DELAY};
+use crate::TransferConfig;
 
-pub(crate) fn with_policies(operator: Operator) -> Operator {
+pub(crate) fn with_policies(operator: Operator, config: &TransferConfig) -> Operator {
     operator
         .layer(
             TimeoutLayer::new()
-                .with_timeout(DEFAULT_OPERATION_TIMEOUT)
-                .with_io_timeout(DEFAULT_OPERATION_TIMEOUT),
+                .with_timeout(config.operation_timeout)
+                .with_io_timeout(config.io_timeout),
         )
         .layer(
             RetryLayer::new()
-                .with_max_times(DEFAULT_MAX_RETRIES)
-                .with_min_delay(DEFAULT_RETRY_DELAY)
-                .with_max_delay(DEFAULT_RETRY_DELAY * 10),
+                .with_max_times(config.max_retries)
+                .with_min_delay(config.retry_delay)
+                .with_max_delay(config.max_retry_delay),
         )
 }

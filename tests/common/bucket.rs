@@ -7,8 +7,8 @@ use opendal::{
     OperationContext, Operator, raw::BytesContentRange, services::S3,
 };
 use storage_transfer_lib::{
-    CancellationToken, HttpConcurrencyLimitLayer, ObjectTask, Result, TransferEngine,
-    TransferLimits, copy_object,
+    CancellationToken, ObjectTask, Result, TransferConfig, TransferEngine, TransferLimits,
+    copy_object,
 };
 use tokio::sync::Notify;
 
@@ -35,6 +35,7 @@ pub enum Fault {
     UnavailableDestination,
     SourceChanged,
     TimeoutRead,
+    TimeoutStat,
     AbortHang,
     AbortDenied,
 }
@@ -114,14 +115,20 @@ impl TestBucket {
     }
 
     pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
+        self.engine_with_config(TransferConfig {
+            limits,
+            ..TransferConfig::default()
+        })
+    }
+
+    pub fn engine_with_config(&self, config: TransferConfig) -> TransferEngine {
         let (source, destination) = self.operators();
-        TransferEngine::new(source, destination, limits).unwrap()
+        TransferEngine::new(source, destination, config).unwrap()
     }
 
     // Copy one fixture object with a single HTTP permit shared by both operators.
     pub async fn copy(&self, index: usize) -> Result<()> {
         let (source, destination) = self.operators();
-        let layer = HttpConcurrencyLimitLayer::new(1).unwrap();
         let mut metadata = MetadataBuilder::file(self.sizes[index] as u64);
         metadata.etag(ETAG);
         let task = ObjectTask {
@@ -129,9 +136,13 @@ impl TestBucket {
             metadata: metadata.build(),
         };
         copy_object(
-            &source.layer(layer.clone()),
-            &destination.layer(layer),
+            &source,
+            &destination,
             &task,
+            &TransferConfig {
+                limits: TransferLimits::new(1, 1).unwrap(),
+                ..TransferConfig::default()
+            },
             &CancellationToken::new(),
         )
         .await
@@ -431,6 +442,10 @@ impl HttpTransport for TestBucket {
         let response = match (request.method(), path.as_slice(), params.as_slice()) {
             (&Method::GET, ["", "source"], params) => self.list(params),
             (&Method::HEAD, ["", "source", "objects", index], []) => {
+                if matches!(self.fault, Fault::TimeoutStat) {
+                    self.state.lock().unwrap().failed_reads += 1;
+                    std::future::pending::<()>().await;
+                }
                 self.stat(index.parse().unwrap(), false, &request)
             }
             (&Method::GET, ["", "source", "objects", index], []) => {

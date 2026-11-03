@@ -7,11 +7,11 @@ use tokio::task::JoinSet;
 
 use crate::operator::with_policies;
 use crate::report::Report;
-use crate::validation::validate_transfer;
+use crate::validation::{validate_config, validate_transfer};
 use crate::worker::CopyWorker;
 use crate::{
-    BucketProducer, CancellationToken, Error, HttpConcurrencyLimitLayer, Result, TransferLimits,
-    TransferProgress,
+    BucketProducer, CancellationToken, Error, HttpConcurrencyLimitLayer, Result, TransferConfig,
+    TransferLimits, TransferProgress,
 };
 
 pub struct TransferEngine {
@@ -22,13 +22,15 @@ pub struct TransferEngine {
 }
 
 impl TransferEngine {
-    pub fn new(source: Operator, destination: Operator, limits: TransferLimits) -> Result<Self> {
+    pub fn new(source: Operator, destination: Operator, config: TransferConfig) -> Result<Self> {
+        validate_config(&config)?;
+        let limits = config.limits;
         validate_transfer(&source, &destination)?;
         let layer = HttpConcurrencyLimitLayer::new(limits.max_ongoing_http_requests())?;
         let (progress, _) = watch::channel(TransferProgress::default());
         Ok(Self {
-            source: with_policies(source.layer(layer.clone())),
-            destination: with_policies(destination.layer(layer)),
+            source: with_policies(source.layer(layer.clone()), &config),
+            destination: with_policies(destination.layer(layer), &config),
             limits,
             progress,
         })
