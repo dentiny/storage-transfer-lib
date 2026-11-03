@@ -56,7 +56,7 @@ Use a bounded worker pool derived from H, initially `W = min(H, 32)`. This is an
 
 ## M0 Establish the project and HTTP limiter
 
-**Status: implemented.** Validated configuration, shared HTTP-only layer, pinned dependencies, controlled transport tests, S3 retry/multipart integration tests and CI are in place. See [M0 architecture and verification](http-concurrency.md). M1–M6 remain pending.
+**Status: implemented.** Validated configuration, shared HTTP-only layer, pinned dependencies, controlled transport tests, S3 retry/multipart integration tests are in place. See [M0 architecture and verification](http-concurrency.md). M1–M6 remain pending.
 
 **Deliverables:** Cargo project, pinned OpenDAL/Tokio dependencies and lockfile, configuration types, `HttpConcurrencyLimitLayer` or equivalent transport wrapper, instrumented fake HTTP transport.
 
