@@ -6,11 +6,11 @@ The engine recursively lists file objects into a bounded queue. Copy workers sha
 
 ## Setup
 
-Requires Rust 1.91 or newer and a Tokio runtime. Clone this repository beside your application and add these dependencies to the application's `Cargo.toml`:
+Requires Rust 1.91 or newer and a Tokio runtime. Add these dependencies to your application's `Cargo.toml`:
 
 ```toml
 [dependencies]
-storage-transfer-lib = { path = "../storage-transfer-lib" }
+storage-transfer-lib = "0.1.0"
 opendal = { version = "0.59.5", default-features = false, features = ["services-s3", "http-transport-reqwest-rustls", "executors-tokio"] }
 tokio = { version = "1.53.3", features = ["macros", "rt", "signal"] }
 ```

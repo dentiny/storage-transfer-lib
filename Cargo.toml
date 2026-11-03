@@ -6,6 +6,9 @@ rust-version = "1.91"
 license = "MIT"
 description = "Bounded bucket-to-bucket transfers using Apache OpenDAL"
 repository = "https://github.com/dentiny/storage-transfer-lib"
+readme = "README.md"
+keywords = ["storage", "opendal", "oci", "s3", "transfer"]
+categories = ["filesystem", "asynchronous"]
 
 [dependencies]
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
