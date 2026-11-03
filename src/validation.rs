@@ -32,7 +32,13 @@ fn validate_operators(source: &Operator, destination: &Operator) -> Result<()> {
     let read = source.info().capability();
     let write = destination.info().capability();
     validate_conditions(read, write)?;
-    validate_multipart(write)
+    validate_multipart(write)?;
+    if !write.stat || !write.read_with_if_match {
+        return Err(Error::Unsupported(
+            "destination must support conditional reads for verification".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_object(task: &ObjectTask) -> Result<()> {
@@ -147,4 +153,39 @@ pub(crate) fn validate_metadata(metadata: &Metadata, capability: Capability) -> 
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_destination<'a>(
+    source: &Metadata,
+    destination: &'a Metadata,
+    path: &str,
+) -> Result<&'a str> {
+    if !destination.is_file() || destination.content_length() != source.content_length() {
+        return Err(Error::VerificationFailed(path.into()));
+    }
+    for (expected, actual) in [
+        (source.content_type(), destination.content_type()),
+        (source.content_encoding(), destination.content_encoding()),
+        (
+            source.content_disposition(),
+            destination.content_disposition(),
+        ),
+        (source.cache_control(), destination.cache_control()),
+    ] {
+        if expected.is_some() && expected != actual {
+            return Err(Error::VerificationFailed(path.into()));
+        }
+    }
+    if let Some(expected) = source.user_metadata() {
+        let actual = destination.user_metadata();
+        for (key, value) in expected {
+            if actual.as_ref().and_then(|values| values.get(key)) != Some(value) {
+                return Err(Error::VerificationFailed(path.into()));
+            }
+        }
+    }
+    destination
+        .etag()
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| Error::VerificationFailed(path.into()))
 }

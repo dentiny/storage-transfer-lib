@@ -4,8 +4,11 @@ mod copy;
 mod engine;
 mod error;
 mod http_limit;
+mod operator;
 mod producer;
+mod report;
 mod validation;
+mod verify;
 mod worker;
 
 pub use common::{ObjectTask, TransferProgress};

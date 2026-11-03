@@ -76,18 +76,121 @@ async fn propagates_listing_worker_and_panic_failures_after_stopping_tasks() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_stops_blocked_requests_and_waiting_workers() {
-    let bucket = TestBucket::new(&[0, 17, BUFFER_SIZE + 13], Fault::BlockRead);
-    let mut engine = bucket.engine(TransferLimits::new(1, 2).unwrap());
-    let cancellation = CancellationToken::new();
-    let run = engine.run(&cancellation);
-    tokio::pin!(run);
-    tokio::select! {
-        result = &mut run => panic!("transfer finished before cancellation: {result:?}"),
-        _ = bucket.read_started.notified() => {}
+    for fault in [Fault::BlockRead, Fault::Throttled] {
+        let bucket = TestBucket::new(&[17, 17, BUFFER_SIZE + 13], fault);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let cancellation = CancellationToken::new();
+        let run = engine.run(&cancellation);
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("transfer finished before cancellation: {result:?}"),
+            _ = bucket.read_started.notified() => {}
+        }
+        cancellation.cancel();
+        assert!(matches!(run.await, Err(Error::Cancelled)));
+        bucket.assert_failures(usize::from(matches!(fault, Fault::Throttled)), 0, 0);
+        bucket.assert_stopped();
     }
-    cancellation.cancel();
-    assert!(matches!(run.await, Err(Error::Cancelled)));
-    bucket.assert_stopped();
+}
+
+#[tokio::test(start_paused = true)]
+async fn retries_both_operators_and_reconciles_lost_commit_responses() {
+    for fault in [Fault::Throttled, Fault::LostCommit] {
+        for size in [17, BUFFER_SIZE + 13] {
+            let bucket = TestBucket::new(&[size], fault);
+            let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+            let summary = engine.run(&CancellationToken::new()).await.unwrap();
+            assert_eq!(summary.copied_objects, 1);
+            bucket.assert_completed(1);
+            let failures = usize::from(matches!(fault, Fault::Throttled));
+            bucket.assert_failures(failures, failures, 0);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_bounds_cleanup_and_preserves_abort_errors() {
+    for fault in [Fault::AbortDenied, Fault::AbortHang] {
+        let bucket = TestBucket::new(&[BUFFER_SIZE + 13, 17, 17, 17], fault);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let cancellation = CancellationToken::new();
+        let run = engine.run(&cancellation);
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("finished before multipart upload: {result:?}"),
+            _ = bucket.read_started.notified() => {}
+        }
+        cancellation.cancel();
+        assert!(
+            matches!(run.await, Err(Error::Secondary { secondary, .. }) if matches!(*secondary, Error::Cleanup { .. }))
+        );
+        bucket.assert_failures(
+            0,
+            0,
+            if matches!(fault, Fault::AbortHang) {
+                3
+            } else {
+                1
+            },
+        );
+        bucket.assert_stopped();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reports_verified_success_and_incomplete_objects() {
+    for (fault, expected) in [
+        (Fault::None, "copied"),
+        (Fault::CorruptDestination, "failed"),
+        (Fault::UnavailableDestination, "uncertain"),
+        (Fault::SourceChanged, "failed"),
+        (Fault::TimeoutRead, "failed"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.jsonl");
+        let bucket = TestBucket::new(&[17], fault);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let result = engine
+            .run_with_report(&CancellationToken::new(), &path)
+            .await;
+        match fault {
+            Fault::None => assert_eq!(result.unwrap().copied_objects, 1),
+            Fault::CorruptDestination => {
+                assert!(matches!(result, Err(Error::VerificationFailed(_))))
+            }
+            Fault::UnavailableDestination => {
+                assert!(matches!(result, Err(Error::CommitUnknown { .. })));
+                bucket.assert_failures(0, 3, 0);
+            }
+            Fault::TimeoutRead => {
+                assert!(matches!(result, Err(Error::Storage(_))));
+                bucket.assert_failures(3, 0, 0);
+            }
+            _ => assert!(
+                matches!(result, Err(Error::Storage(error)) if error.kind() == opendal::ErrorKind::ConditionNotMatch)
+            ),
+        }
+        let report = std::fs::read_to_string(&path).unwrap();
+        let records: Vec<serde_json::Value> = report
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["path"], "objects/0");
+        assert_eq!(records[0]["status"], expected);
+        assert_eq!(records[1]["type"], "finished");
+        assert_eq!(
+            records[1]["progress"]["copied_objects"],
+            u64::from(expected == "copied")
+        );
+        assert!(matches!(
+            engine
+                .run_with_report(&CancellationToken::new(), &path)
+                .await,
+            Err(Error::Report(_))
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), report);
+    }
 }

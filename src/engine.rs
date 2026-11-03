@@ -1,9 +1,12 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use opendal::Operator;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinSet;
 
+use crate::operator::with_policies;
+use crate::report::Report;
 use crate::validation::validate_transfer;
 use crate::worker::CopyWorker;
 use crate::{
@@ -24,8 +27,8 @@ impl TransferEngine {
         let layer = HttpConcurrencyLimitLayer::new(limits.max_ongoing_http_requests())?;
         let (progress, _) = watch::channel(TransferProgress::default());
         Ok(Self {
-            source: source.layer(layer.clone()),
-            destination: destination.layer(layer),
+            source: with_policies(source.layer(layer.clone())),
+            destination: with_policies(destination.layer(layer)),
             limits,
             progress,
         })
@@ -37,6 +40,26 @@ impl TransferEngine {
 
     // A mutable borrow allows one transfer at a time per engine.
     pub async fn run(&mut self, cancellation: &CancellationToken) -> Result<TransferProgress> {
+        self.run_inner(cancellation, None).await
+    }
+
+    pub async fn run_with_report(
+        &mut self,
+        cancellation: &CancellationToken,
+        path: &Path,
+    ) -> Result<TransferProgress> {
+        let report = Report::create(path).await?;
+        let result = self.run_inner(cancellation, Some(report.clone())).await;
+        let progress = *self.progress.borrow();
+        let reported = report.finished(progress, &result).await;
+        crate::error::combine(result, reported)
+    }
+
+    async fn run_inner(
+        &mut self,
+        cancellation: &CancellationToken,
+        report: Option<Report>,
+    ) -> Result<TransferProgress> {
         self.progress.send_replace(TransferProgress::default());
         let cancellation = cancellation.child_token();
         let (producer, queue) = BucketProducer::new(self.source.clone(), self.limits);
@@ -57,24 +80,34 @@ impl TransferEngine {
             queue: Arc::new(Mutex::new(queue)),
             cancellation: cancellation.clone(),
             progress: self.progress.clone(),
+            report,
         };
         for _ in 0..self.limits.worker_count() {
             tasks.spawn(worker.clone().run());
         }
 
         let mut first_error = None;
+        let mut cleanup_error = None;
         // After failure, drain every task so active copies can abort unfinished uploads.
         while let Some(result) = tasks.join_next().await {
             let result = result.unwrap_or_else(|error| Err(Error::Task(error)));
-            if let Err(error) = result
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-                cancellation.cancel();
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                    cancellation.cancel();
+                } else if error.has_cleanup_failure() && cleanup_error.is_none() {
+                    cleanup_error = Some(error);
+                }
             }
         }
         if let Some(error) = first_error {
-            return Err(error);
+            return Err(match cleanup_error {
+                Some(cleanup) => Error::Secondary {
+                    original: Box::new(error),
+                    secondary: Box::new(cleanup),
+                },
+                None => error,
+            });
         }
         Ok(*self.progress.borrow())
     }

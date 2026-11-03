@@ -30,6 +30,14 @@ pub enum Fault {
     Panic,
     BlockRead,
     ExistingDestination,
+    Throttled,
+    LostCommit,
+    CorruptDestination,
+    UnavailableDestination,
+    SourceChanged,
+    TimeoutRead,
+    AbortHang,
+    AbortDenied,
 }
 
 #[derive(Default)]
@@ -41,6 +49,7 @@ struct ObjectState {
     parts: usize,
     completed: bool,
     aborted: bool,
+    lost_response: bool,
     // Existing bytes used to verify create-only writes; None means the destination is absent.
     existing: Option<&'static [u8]>,
 }
@@ -49,6 +58,9 @@ struct State {
     objects: Vec<ObjectState>,
     ongoing: usize,
     peak: usize,
+    failed_reads: usize,
+    failed_writes: usize,
+    aborts: usize,
 }
 
 #[derive(Clone)]
@@ -73,6 +85,9 @@ impl TestBucket {
                     .collect(),
                 ongoing: 0,
                 peak: 0,
+                failed_reads: 0,
+                failed_writes: 0,
+                aborts: 0,
             })),
             sizes: sizes.into(),
             fault,
@@ -166,6 +181,15 @@ impl TestBucket {
         assert!(state.objects.iter().any(|object| !object.completed));
     }
 
+    pub fn assert_failures(&self, reads: usize, writes: usize, aborts: usize) {
+        let state = self.state.lock().unwrap();
+        assert_eq!(
+            (state.failed_reads, state.failed_writes, state.aborts),
+            (reads, writes, aborts)
+        );
+        assert_eq!(state.ongoing, 0);
+    }
+
     fn list(&self, query: &[(&str, &str)]) -> Response<Buffer> {
         let param = |name| {
             query
@@ -205,9 +229,15 @@ impl TestBucket {
         Self::response(StatusCode::OK, xml)
     }
 
-    fn stat(&self, index: usize, request: &Request<Buffer>) -> Response<Buffer> {
-        assert_eq!(request.headers()["if-match"], ETAG);
-        if index == 0 {
+    fn stat(&self, index: usize, destination: bool, request: &Request<Buffer>) -> Response<Buffer> {
+        if destination {
+            if !self.state.lock().unwrap().objects[index].completed {
+                return Self::response(StatusCode::NOT_FOUND, "");
+            }
+        } else {
+            assert_eq!(request.headers()["if-match"], ETAG);
+        }
+        if index == 0 && !destination {
             match self.fault {
                 Fault::Panic => panic!("injected worker panic"),
                 Fault::Copy => return Self::response(StatusCode::PRECONDITION_FAILED, ""),
@@ -224,8 +254,31 @@ impl TestBucket {
         response
     }
 
-    async fn read(&self, index: usize, request: &Request<Buffer>) -> Response<Buffer> {
-        if matches!(self.fault, Fault::BlockRead) {
+    async fn read(
+        &self,
+        index: usize,
+        destination: bool,
+        request: &Request<Buffer>,
+    ) -> Response<Buffer> {
+        if destination {
+            assert!(self.state.lock().unwrap().objects[index].completed);
+        } else {
+            if matches!(self.fault, Fault::SourceChanged) {
+                return Self::response(StatusCode::PRECONDITION_FAILED, "");
+            }
+            if matches!(self.fault, Fault::Throttled)
+                && self.state.lock().unwrap().failed_reads == 0
+            {
+                self.state.lock().unwrap().failed_reads += 1;
+                self.read_started.notify_one();
+                return Self::response(StatusCode::TOO_MANY_REQUESTS, "");
+            }
+            if matches!(self.fault, Fault::TimeoutRead) {
+                self.state.lock().unwrap().failed_reads += 1;
+                std::future::pending::<()>().await;
+            }
+        }
+        if !destination && matches!(self.fault, Fault::BlockRead) {
             self.read_started.notify_one();
             std::future::pending::<()>().await;
         }
@@ -240,11 +293,16 @@ impl TestBucket {
         assert!(size > 0 && size <= BUFFER_SIZE as u64);
         assert!(range.offset() + size <= self.sizes[index] as u64);
         let range = range.to_content_range(self.sizes[index]).unwrap();
-        self.state.lock().unwrap().objects[index].reads += 1;
-        let bytes: Vec<u8> = range
+        if !destination {
+            self.state.lock().unwrap().objects[index].reads += 1;
+        }
+        let mut bytes: Vec<u8> = range
             .clone()
             .map(|offset| ((index + offset) % 251) as u8)
             .collect();
+        if destination && matches!(self.fault, Fault::CorruptDestination) {
+            bytes[0] ^= 1;
+        }
         let mut response = Self::response(StatusCode::PARTIAL_CONTENT, bytes);
         let content_range = BytesContentRange::default()
             .with_range(range.start as u64, (range.end - 1) as u64)
@@ -262,9 +320,15 @@ impl TestBucket {
         part: Option<usize>,
     ) -> Response<Buffer> {
         let mut state = self.state.lock().unwrap();
+        if matches!(self.fault, Fault::UnavailableDestination)
+            || matches!(self.fault, Fault::Throttled) && state.failed_writes == 0
+        {
+            state.failed_writes += 1;
+            return Self::response(StatusCode::SERVICE_UNAVAILABLE, "");
+        }
         let object = &mut state.objects[index];
-        assert!(!object.completed);
         if let Some(part) = part {
+            assert!(!object.completed);
             assert_eq!(part, object.parts + 1);
             object.parts += 1;
         } else {
@@ -288,6 +352,12 @@ impl TestBucket {
     fn complete(&self, index: usize, request: &Request<Buffer>) -> Response<Buffer> {
         let mut state = self.state.lock().unwrap();
         let object = &mut state.objects[index];
+        if object.completed {
+            return Self::response(
+                StatusCode::NOT_FOUND,
+                "<Error><Code>NoSuchUpload</Code></Error>",
+            );
+        }
         if let Some(response) = Self::collision(request, object) {
             return response;
         }
@@ -309,7 +379,7 @@ impl TestBucket {
 
     fn collision(request: &Request<Buffer>, object: &ObjectState) -> Option<Response<Buffer>> {
         assert_eq!(request.headers()["if-none-match"], "*");
-        object.existing.map(|_| {
+        (object.existing.is_some() || object.completed).then(|| {
             Self::response(
                 StatusCode::PRECONDITION_FAILED,
                 "<Error><Code>PreconditionFailed</Code><Message>already exists</Message></Error>",
@@ -363,10 +433,16 @@ impl HttpTransport for TestBucket {
         let response = match (request.method(), path.as_slice(), params.as_slice()) {
             (&Method::GET, ["", "source"], params) => self.list(params),
             (&Method::HEAD, ["", "source", "objects", index], []) => {
-                self.stat(index.parse().unwrap(), &request)
+                self.stat(index.parse().unwrap(), false, &request)
             }
             (&Method::GET, ["", "source", "objects", index], []) => {
-                self.read(index.parse().unwrap(), &request).await
+                self.read(index.parse().unwrap(), false, &request).await
+            }
+            (&Method::HEAD, ["", "destination", "objects", index], []) => {
+                self.stat(index.parse().unwrap(), true, &request)
+            }
+            (&Method::GET, ["", "destination", "objects", index], []) => {
+                self.read(index.parse().unwrap(), true, &request).await
             }
             (&Method::PUT, ["", "destination", "objects", index], []) => {
                 self.write(index.parse().unwrap(), &request, None)
@@ -382,11 +458,17 @@ impl HttpTransport for TestBucket {
                 &Method::PUT,
                 ["", "destination", "objects", index],
                 [("partNumber", part), ("uploadId", "test-upload")],
-            ) => self.write(
-                index.parse().unwrap(),
-                &request,
-                Some(part.parse().unwrap()),
-            ),
+            ) => {
+                if matches!(self.fault, Fault::AbortHang | Fault::AbortDenied) {
+                    self.read_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                self.write(
+                    index.parse().unwrap(),
+                    &request,
+                    Some(part.parse().unwrap()),
+                )
+            }
             (
                 &Method::POST,
                 ["", "destination", "objects", index],
@@ -397,8 +479,17 @@ impl HttpTransport for TestBucket {
                 ["", "destination", "objects", index],
                 [("uploadId", "test-upload")],
             ) => {
-                self.state.lock().unwrap().objects[index.parse::<usize>().unwrap()].aborted = true;
-                Self::response(StatusCode::NO_CONTENT, "")
+                self.state.lock().unwrap().aborts += 1;
+                if matches!(self.fault, Fault::AbortHang) {
+                    std::future::pending::<()>().await;
+                }
+                if matches!(self.fault, Fault::AbortDenied) {
+                    Self::response(StatusCode::FORBIDDEN, "")
+                } else {
+                    self.state.lock().unwrap().objects[index.parse::<usize>().unwrap()].aborted =
+                        true;
+                    Self::response(StatusCode::NO_CONTENT, "")
+                }
             }
             _ => panic!(
                 "unexpected S3 request: {} {}",
@@ -406,6 +497,21 @@ impl HttpTransport for TestBucket {
                 request.uri()
             ),
         };
+        if matches!(self.fault, Fault::LostCommit)
+            && response.status() == StatusCode::OK
+            && let ["", "destination", "objects", index] = path.as_slice()
+        {
+            let mut state = self.state.lock().unwrap();
+            let object = &mut state.objects[index.parse::<usize>().unwrap()];
+            if object.completed && !object.lost_response {
+                object.lost_response = true;
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "lost commit response",
+                )
+                .set_temporary());
+            }
+        }
         let (parts, body) = response.into_parts();
         let size = body.len() as u64;
         let body = stream::iter([Ok(body)]).map(move |chunk| {
