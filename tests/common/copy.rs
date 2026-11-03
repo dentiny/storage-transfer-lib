@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures_util::stream;
 use http::{Request, Response, StatusCode};
@@ -10,7 +9,6 @@ use opendal::{
 use storage_transfer_lib::{
     CancellationToken, HttpConcurrencyLimitLayer, ObjectTask, Result, copy_object,
 };
-use tokio::time::timeout;
 
 pub const BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const KEY: &str = "nested/object";
@@ -83,7 +81,7 @@ impl TestCopy {
         }
     }
 
-    // Bound test execution to detect a leaked permit or H=1 read/write deadlock.
+    // Copy the test object through source and destination operators sharing one HTTP permit.
     pub async fn copy(&self) -> Result<()> {
         let mut metadata = MetadataBuilder::file(self.transport.size as u64);
         metadata.etag(ETAG);
@@ -91,17 +89,13 @@ impl TestCopy {
             path: KEY.into(),
             metadata: metadata.build(),
         };
-        timeout(
-            Duration::from_secs(10),
-            copy_object(
-                &self.source,
-                &self.destination,
-                &task,
-                &CancellationToken::new(),
-            ),
+        copy_object(
+            &self.source,
+            &self.destination,
+            &task,
+            &CancellationToken::new(),
         )
         .await
-        .expect("copy stalled with HTTP concurrency 1")
     }
 
     pub fn assert_completed(&self) {

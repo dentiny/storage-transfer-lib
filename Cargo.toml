@@ -16,7 +16,7 @@ tokio-util = { version = "=0.7.20", features = ["rt"] }
 
 [dev-dependencies]
 futures-util = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
-tokio = { version = "=1.53.3", features = ["macros", "rt", "time"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt"] }
 
 [lints.rust]
 unsafe_code = "forbid"
