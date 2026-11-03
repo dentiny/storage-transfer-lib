@@ -120,9 +120,7 @@ async fn cancellation_bounds_cleanup_and_preserves_abort_errors() {
             _ = bucket.read_started.notified() => {}
         }
         cancellation.cancel();
-        assert!(
-            matches!(run.await, Err(Error::Secondary { secondary, .. }) if matches!(*secondary, Error::Cleanup { .. }))
-        );
+        assert!(matches!(run.await, Err(Error::Cleanup { .. })));
         bucket.assert_failures(
             0,
             0,

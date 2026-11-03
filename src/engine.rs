@@ -52,7 +52,9 @@ impl TransferEngine {
         let result = self.run_inner(cancellation, Some(report.clone())).await;
         let progress = *self.progress.borrow();
         let reported = report.finished(progress, &result).await;
-        crate::error::combine(result, reported)
+        let progress = result?;
+        reported?;
+        Ok(progress)
     }
 
     async fn run_inner(
@@ -86,28 +88,19 @@ impl TransferEngine {
             tasks.spawn(worker.clone().run());
         }
 
-        let mut first_error = None;
-        let mut cleanup_error = None;
+        let mut failure = None;
         // After failure, drain every task so active copies can abort unfinished uploads.
         while let Some(result) = tasks.join_next().await {
             let result = result.unwrap_or_else(|error| Err(Error::Task(error)));
             if let Err(error) = result {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                    cancellation.cancel();
-                } else if error.has_cleanup_failure() && cleanup_error.is_none() {
-                    cleanup_error = Some(error);
+                cancellation.cancel();
+                if failure.is_none() || matches!(error, Error::Cleanup { .. }) {
+                    failure = Some(error);
                 }
             }
         }
-        if let Some(error) = first_error {
-            return Err(match cleanup_error {
-                Some(cleanup) => Error::Secondary {
-                    original: Box::new(error),
-                    secondary: Box::new(cleanup),
-                },
-                None => error,
-            });
+        if let Some(error) = failure {
+            return Err(error);
         }
         Ok(*self.progress.borrow())
     }

@@ -17,10 +17,6 @@ pub enum Error {
     Cancelled,
     VerificationFailed(String),
     Report(std::io::Error),
-    Secondary {
-        original: Box<Error>,
-        secondary: Box<Error>,
-    },
     Task(tokio::task::JoinError),
     Cleanup {
         original: Box<Error>,
@@ -51,12 +47,6 @@ impl fmt::Display for Error {
             Self::Cancelled => write!(f, "transfer cancelled"),
             Self::VerificationFailed(path) => write!(f, "destination verification failed: {path}"),
             Self::Report(error) => write!(f, "transfer report failed: {error}"),
-            Self::Secondary {
-                original,
-                secondary,
-            } => {
-                write!(f, "{original}; additional failure: {secondary}")
-            }
             Self::Task(error) => write!(f, "transfer task failed: {error}"),
             Self::Cleanup { original, cleanup } => {
                 write!(f, "{original}; aborting the upload also failed: {cleanup}")
@@ -74,7 +64,6 @@ impl std::error::Error for Error {
             Self::Storage(error) => Some(error),
             Self::Task(error) => Some(error),
             Self::Report(error) => Some(error),
-            Self::Secondary { original, .. } => Some(original.as_ref()),
             Self::Cleanup { original, .. } => Some(original.as_ref()),
             _ => None,
         }
@@ -84,29 +73,5 @@ impl std::error::Error for Error {
 impl From<opendal::Error> for Error {
     fn from(error: opendal::Error) -> Self {
         Self::Storage(error)
-    }
-}
-
-impl Error {
-    pub(crate) fn has_cleanup_failure(&self) -> bool {
-        match self {
-            Self::Cleanup { .. } => true,
-            Self::Secondary {
-                original,
-                secondary,
-            } => original.has_cleanup_failure() || secondary.has_cleanup_failure(),
-            _ => false,
-        }
-    }
-}
-
-pub(crate) fn combine<T>(result: Result<T>, additional: Result<()>) -> Result<T> {
-    match (result, additional) {
-        (Err(original), Err(secondary)) => Err(Error::Secondary {
-            original: Box::new(original),
-            secondary: Box::new(secondary),
-        }),
-        (Ok(_), Err(error)) => Err(error),
-        (result, Ok(())) => result,
     }
 }

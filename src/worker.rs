@@ -29,7 +29,7 @@ impl CopyWorker {
             let Some(task) = task else {
                 return Ok(());
             };
-            let mut result =
+            let result =
                 copy_prepared(&self.source, &self.destination, &task, &self.cancellation).await;
             if result.is_ok() {
                 self.progress.send_modify(|progress| {
@@ -37,11 +37,11 @@ impl CopyWorker {
                     progress.copied_bytes += task.metadata.content_length();
                 });
             }
-            if let Some(report) = &self.report {
-                let reported = report.object(&task, &result).await;
-                result = crate::error::combine(result, reported);
-            }
-            result?;
+            let reported = match &self.report {
+                Some(report) => report.object(&task, &result).await,
+                None => Ok(()),
+            };
+            result.and(reported)?;
         }
     }
 }
