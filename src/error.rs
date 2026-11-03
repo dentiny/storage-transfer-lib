@@ -15,6 +15,7 @@ pub enum Error {
     Unsupported(String),
     SourceChanged(String),
     Cancelled,
+    Task(tokio::task::JoinError),
     Cleanup {
         original: Box<Error>,
         cleanup: opendal::Error,
@@ -41,7 +42,8 @@ impl fmt::Display for Error {
                 f,
                 "source object changed or returned an invalid range: {path}"
             ),
-            Self::Cancelled => write!(f, "copy cancelled"),
+            Self::Cancelled => write!(f, "transfer cancelled"),
+            Self::Task(error) => write!(f, "transfer task failed: {error}"),
             Self::Cleanup { original, cleanup } => {
                 write!(f, "{original}; aborting the upload also failed: {cleanup}")
             }
@@ -56,6 +58,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Storage(error) => Some(error),
+            Self::Task(error) => Some(error),
             Self::Cleanup { original, .. } => Some(original.as_ref()),
             _ => None,
         }

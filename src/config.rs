@@ -5,6 +5,7 @@ use tokio::sync::Semaphore;
 use crate::{Error, Result};
 
 const MAX_LIST_PAGE_SIZE: usize = 1000;
+const MAX_COPY_WORKERS: usize = 32;
 pub(crate) const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_COPY_PARTS: u64 = 10_000;
 
@@ -31,6 +32,10 @@ impl TransferLimits {
 
     pub fn list_page_size(self) -> usize {
         self.max_queued_objects().min(MAX_LIST_PAGE_SIZE)
+    }
+
+    pub(crate) fn worker_count(self) -> usize {
+        self.max_ongoing_http_requests().min(MAX_COPY_WORKERS)
     }
 
     pub fn max_ongoing_http_requests(self) -> usize {

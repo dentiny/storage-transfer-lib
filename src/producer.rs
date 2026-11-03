@@ -1,13 +1,14 @@
 use futures_util::TryStreamExt;
 use opendal::{EntryMode, Operator};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-use crate::{Error, ObjectTask, Result, TransferLimits};
+use crate::{Error, ObjectTask, Result, TransferLimits, TransferProgress};
 
 pub struct BucketProducer {
     source: Operator,
     sender: mpsc::Sender<ObjectTask>,
     list_page_size: usize,
+    progress: Option<watch::Sender<TransferProgress>>,
 }
 
 impl BucketProducer {
@@ -18,9 +19,15 @@ impl BucketProducer {
                 source,
                 sender,
                 list_page_size: limits.list_page_size(),
+                progress: None,
             },
             receiver,
         )
+    }
+
+    pub(crate) fn with_progress(mut self, progress: watch::Sender<TransferProgress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     // Run alongside the consumer. Queue closure alone does not mean listing succeeded;
@@ -56,7 +63,15 @@ impl BucketProducer {
             };
             let (path, metadata) = entry.into_parts();
             match metadata.mode() {
-                EntryMode::FILE => permit.send(ObjectTask { path, metadata }),
+                EntryMode::FILE => {
+                    if let Some(progress) = &self.progress {
+                        progress.send_modify(|progress| {
+                            progress.listed_objects += 1;
+                            progress.listed_bytes += metadata.content_length();
+                        });
+                    }
+                    permit.send(ObjectTask { path, metadata });
+                }
                 EntryMode::DIR => continue,
                 EntryMode::Unknown => return Err(Error::UnsupportedEntry(path)),
             }
