@@ -8,7 +8,8 @@ use opendal::raw::{Layer, Servicer};
 use opendal::{Buffer, HttpBody, HttpTransport, HttpTransporter, OperationContext, Result};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::config::{ConfigError, validate_limit};
+use crate::ConfigError;
+use crate::config::validate_limit;
 
 #[derive(Clone, Debug)]
 pub struct HttpConcurrencyLimitLayer {
