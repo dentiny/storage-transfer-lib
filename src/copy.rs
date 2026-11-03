@@ -29,6 +29,7 @@ pub async fn copy_object(
     let reader = source
         .reader_with(&task.path)
         .if_match(etag)
+        .chunk(COPY_BUFFER_SIZE)
         .concurrent(1)
         .await?;
     let mut writer = destination.writer_options(&task.path, options).await?;
