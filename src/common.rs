@@ -1,5 +1,8 @@
 use opendal::Metadata;
 
+// SHA-256 digest of an object's contents, used to verify the copied data.
+pub(crate) type Sha256Digest = [u8; 32];
+
 // Describes one file object queued for copying; contains no object data.
 // The producer filters out directory entries before creating tasks.
 #[derive(Clone, Debug)]
@@ -10,10 +13,10 @@ pub struct ObjectTask {
     pub metadata: Metadata,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct TransferProgress {
     pub listed_objects: u64,
-    // Counted only after the destination writer closes successfully.
+    // Counted after the destination data and metadata have been verified.
     pub copied_objects: u64,
     pub copied_bytes: u64,
 }

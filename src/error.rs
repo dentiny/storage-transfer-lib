@@ -4,10 +4,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Debug)]
 pub enum Error {
-    InvalidLimit {
-        field: &'static str,
-        value: usize,
-    },
+    InvalidLimit { field: &'static str, value: usize },
     InvalidRoot,
     UnsupportedEntry(String),
     Storage(opendal::Error),
@@ -15,11 +12,9 @@ pub enum Error {
     Unsupported(String),
     SourceChanged(String),
     Cancelled,
+    VerificationFailed(String),
+    Report(std::io::Error),
     Task(tokio::task::JoinError),
-    Cleanup {
-        original: Box<Error>,
-        cleanup: opendal::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,10 +38,9 @@ impl fmt::Display for Error {
                 "source object changed or returned an invalid range: {path}"
             ),
             Self::Cancelled => write!(f, "transfer cancelled"),
+            Self::VerificationFailed(path) => write!(f, "destination verification failed: {path}"),
+            Self::Report(error) => write!(f, "transfer report failed: {error}"),
             Self::Task(error) => write!(f, "transfer task failed: {error}"),
-            Self::Cleanup { original, cleanup } => {
-                write!(f, "{original}; aborting the upload also failed: {cleanup}")
-            }
             Self::ConsumerClosed => {
                 write!(f, "object queue receiver closed before listing completed")
             }
@@ -59,7 +53,7 @@ impl std::error::Error for Error {
         match self {
             Self::Storage(error) => Some(error),
             Self::Task(error) => Some(error),
-            Self::Cleanup { original, .. } => Some(original.as_ref()),
+            Self::Report(error) => Some(error),
             _ => None,
         }
     }

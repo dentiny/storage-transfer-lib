@@ -1,8 +1,13 @@
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
 use crate::{Error, Result};
+
+pub(crate) const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_MAX_RETRIES: usize = 2;
+pub(crate) const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 const MAX_LIST_PAGE_SIZE: usize = 1000;
 const MAX_COPY_WORKERS: usize = 32;
