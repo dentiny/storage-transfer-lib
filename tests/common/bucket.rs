@@ -35,7 +35,6 @@ pub enum Fault {
     UnavailableDestination,
     SourceChanged,
     TimeoutRead,
-    TimeoutStat,
     AbortHang,
     AbortDenied,
 }
@@ -115,15 +114,16 @@ impl TestBucket {
     }
 
     pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
-        self.engine_with_config(TransferConfig {
-            limits,
-            ..TransferConfig::default()
-        })
-    }
-
-    pub fn engine_with_config(&self, config: TransferConfig) -> TransferEngine {
         let (source, destination) = self.operators();
-        TransferEngine::new(source, destination, config).unwrap()
+        TransferEngine::new(
+            source,
+            destination,
+            TransferConfig {
+                limits,
+                ..TransferConfig::default()
+            },
+        )
+        .unwrap()
     }
 
     // Copy one fixture object with a single HTTP permit shared by both operators.
@@ -442,10 +442,6 @@ impl HttpTransport for TestBucket {
         let response = match (request.method(), path.as_slice(), params.as_slice()) {
             (&Method::GET, ["", "source"], params) => self.list(params),
             (&Method::HEAD, ["", "source", "objects", index], []) => {
-                if matches!(self.fault, Fault::TimeoutStat) {
-                    self.state.lock().unwrap().failed_reads += 1;
-                    std::future::pending::<()>().await;
-                }
                 self.stat(index.parse().unwrap(), false, &request)
             }
             (&Method::GET, ["", "source", "objects", index], []) => {

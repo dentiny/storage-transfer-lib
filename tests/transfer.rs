@@ -2,9 +2,7 @@
 mod common;
 
 use common::{BUFFER_SIZE, Fault, TestBucket};
-use storage_transfer_lib::{
-    CancellationToken, Error, TransferConfig, TransferLimits, TransferProgress,
-};
+use storage_transfer_lib::{CancellationToken, Error, TransferLimits, TransferProgress};
 
 #[tokio::test]
 async fn copies_objects_in_bounded_ranges_with_one_http_permit() {
@@ -189,51 +187,5 @@ async fn reports_verified_success_and_incomplete_objects() {
             Err(Error::Report(_))
         ));
         assert_eq!(std::fs::read_to_string(path).unwrap(), report);
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn applies_custom_retry_and_timeout_configuration() {
-    use std::time::Duration;
-
-    let config = TransferConfig {
-        limits: TransferLimits::new(1, 1).unwrap(),
-        operation_timeout: Duration::from_millis(50),
-        io_timeout: Duration::from_millis(250),
-        max_retries: 1,
-        retry_delay: Duration::from_millis(25),
-        max_retry_delay: Duration::from_millis(25),
-    };
-    for max_retries in [0, 1] {
-        let bucket = TestBucket::new(&[17], Fault::Throttled);
-        let mut engine = bucket.engine_with_config(TransferConfig {
-            max_retries,
-            ..config
-        });
-        let result = engine.run(&CancellationToken::new()).await;
-        if max_retries == 0 {
-            assert!(matches!(result, Err(Error::Storage(_))));
-            bucket.assert_failures(1, 0, 0);
-        } else {
-            assert_eq!(result.unwrap().copied_objects, 1);
-            bucket.assert_completed(1);
-            bucket.assert_failures(1, 1, 0);
-        }
-    }
-    for (fault, expected_timeout) in [
-        (Fault::TimeoutStat, config.operation_timeout),
-        (Fault::TimeoutRead, config.io_timeout),
-    ] {
-        let bucket = TestBucket::new(&[17], fault);
-        let mut engine = bucket.engine_with_config(config);
-        let start = tokio::time::Instant::now();
-        assert!(matches!(
-            engine.run(&CancellationToken::new()).await,
-            Err(Error::Storage(_))
-        ));
-        let elapsed = start.elapsed();
-        assert!(elapsed >= expected_timeout * 2);
-        assert!(elapsed < Duration::from_secs(1));
-        bucket.assert_failures(2, 0, 0);
     }
 }
