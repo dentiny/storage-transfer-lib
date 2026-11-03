@@ -20,37 +20,49 @@ impl HttpTransport for TestTransport {
     }
 }
 
-fn transport() -> (HttpTransporter, mpsc::UnboundedReceiver<BodySender>) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    (HttpTransporter::new(TestTransport(tx)), rx)
+struct TestClient {
+    transport: HttpTransporter,
+    calls: mpsc::UnboundedReceiver<BodySender>,
 }
 
-fn request() -> Request<Buffer> {
-    Request::new(Buffer::new())
-}
+impl TestClient {
+    fn new(layer: &HttpConcurrencyLimitLayer) -> Self {
+        let (tx, calls) = mpsc::unbounded_channel();
+        Self {
+            transport: layer.wrap(HttpTransporter::new(TestTransport(tx))),
+            calls,
+        }
+    }
 
-async fn fetch(transport: &HttpTransporter) -> HttpBody {
-    timeout(Duration::from_secs(5), transport.fetch(request()))
+    fn request() -> Request<Buffer> {
+        Request::new(Buffer::new())
+    }
+
+    async fn fetch(&self) -> HttpBody {
+        timeout(
+            Duration::from_secs(5),
+            self.transport.fetch(Self::request()),
+        )
         .await
         .expect("request blocked")
         .unwrap()
         .into_body()
+    }
 }
 
 #[tokio::test]
 async fn source_and_destination_share_limit_until_body_eof() {
-    let (inner, mut calls) = transport();
     let layer = HttpConcurrencyLimitLayer::new(2).unwrap();
-    let source = layer.wrap(inner.clone());
-    let destination = layer.clone().wrap(inner);
-    let mut first = fetch(&source).await;
-    let _second = fetch(&destination).await;
-    let sender = calls.try_recv().unwrap();
-    let _second_sender = calls.try_recv().unwrap();
+    let mut source = TestClient::new(&layer);
+    let mut destination = TestClient::new(&layer.clone());
+    let mut first = source.fetch().await;
+    let _second = destination.fetch().await;
+    let sender = source.calls.try_recv().unwrap();
+    let _second_sender = destination.calls.try_recv().unwrap();
 
-    let mut waiting = Box::pin(destination.fetch(request()));
+    let mut waiting = Box::pin(destination.transport.fetch(TestClient::request()));
     assert!(poll!(&mut waiting).is_pending());
-    assert!(calls.try_recv().is_err());
+    assert!(destination.calls.try_recv().is_err());
 
     sender.send(Ok(Buffer::from("data"))).unwrap();
     drop(sender);
@@ -60,24 +72,24 @@ async fn source_and_destination_share_limit_until_body_eof() {
         .await
         .unwrap()
         .unwrap();
-    assert!(calls.try_recv().is_ok());
+    assert!(destination.calls.try_recv().is_ok());
 }
 
 #[tokio::test]
 async fn body_error_and_drop_release_capacity() {
-    let (inner, mut calls) = transport();
-    let transport = HttpConcurrencyLimitLayer::new(1).unwrap().wrap(inner);
-    let mut body = fetch(&transport).await;
-    let sender = calls.try_recv().unwrap();
+    let layer = HttpConcurrencyLimitLayer::new(1).unwrap();
+    let mut client = TestClient::new(&layer);
+    let mut body = client.fetch().await;
+    let sender = client.calls.try_recv().unwrap();
     sender
         .send(Err(Error::new(ErrorKind::Unexpected, "test error")))
         .unwrap();
     assert!(body.to_buffer().await.is_err());
 
-    let next = fetch(&transport).await;
-    let sender = calls.try_recv().unwrap();
+    let next = client.fetch().await;
+    let sender = client.calls.try_recv().unwrap();
     drop(next);
     assert!(sender.is_closed());
-    let _body = fetch(&transport).await;
-    assert!(calls.try_recv().is_ok());
+    let _body = client.fetch().await;
+    assert!(client.calls.try_recv().is_ok());
 }
