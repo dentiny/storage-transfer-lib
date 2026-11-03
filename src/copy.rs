@@ -42,7 +42,6 @@ pub async fn copy_object(
             let mut offset = 0;
             while offset < size {
                 let end = (offset + COPY_BUFFER_SIZE as u64).min(size);
-                // Finish the GET body before requesting a PUT permit, so H=1 can progress.
                 let buffer = reader.read(offset..end).await?;
                 if buffer.len() as u64 != end - offset {
                     return Err(Error::SourceChanged(task.path.clone()));
