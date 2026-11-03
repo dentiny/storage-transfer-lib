@@ -11,29 +11,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{ConfigError, validate_limit};
 
-/// A shared, HTTP-only concurrency budget for OpenDAL operators.
-///
-/// Clone **one** layer onto source and destination after configuring their
-/// underlying transports, before creating readers/writers/listers. Clones share
-/// the budget; separate calls to `new` create independent budgets.
-///
-/// A permit covers dispatch through response-body EOF, error, or drop. This
-/// limits transport calls, not object workers, chunks, or buffered bytes.
-///
-/// ```no_run
-/// use opendal::{Operator, services::S3};
-/// use storage_transfer_lib::{HttpConcurrencyLimitLayer, TransferLimits};
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// opendal::install_default();
-/// let limits = TransferLimits::new(1024, 16)?;
-/// let layer = HttpConcurrencyLimitLayer::new(limits.max_ongoing_http_requests())?;
-/// let source = Operator::new(S3::default().bucket("source").region("us-ashburn-1"))?
-///     .layer(layer.clone());
-/// let destination = Operator::new(S3::default().bucket("destination").region("us-ashburn-1"))?
-///     .layer(layer.clone());
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Clone, Debug)]
 pub struct HttpConcurrencyLimitLayer {
     semaphore: Arc<Semaphore>,
@@ -51,8 +28,6 @@ impl HttpConcurrencyLimitLayer {
         })
     }
 
-    /// Number of dispatched requests, including active response bodies.
-    /// Waiters are not counted. This is an instantaneous observation.
     pub fn ongoing_http_requests(&self) -> usize {
         // A fair semaphore can reserve a released permit for an unpolled waiter.
         // Such a waiter has not dispatched a request and must not be counted.
@@ -63,9 +38,6 @@ impl HttpConcurrencyLimitLayer {
         self.limit
     }
 
-    /// Wrap a transport directly, sharing this layer's budget.
-    ///
-    /// Install either this wrapper or the layer once per operator, not both.
     pub fn wrap(&self, inner: HttpTransporter) -> HttpTransporter {
         HttpTransporter::new(LimitedTransport {
             inner,

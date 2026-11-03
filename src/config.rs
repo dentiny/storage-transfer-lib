@@ -3,7 +3,6 @@ use std::num::NonZeroUsize;
 
 use tokio::sync::Semaphore;
 
-/// The only two public concurrency settings. No chunk-level limit is imposed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
     max_queued_objects: NonZeroUsize,
@@ -11,7 +10,6 @@ pub struct TransferLimits {
 }
 
 impl TransferLimits {
-    /// Validate both limits before constructing a channel or semaphore.
     pub fn new(
         max_queued_objects: usize,
         max_ongoing_http_requests: usize,
@@ -34,7 +32,6 @@ impl TransferLimits {
     }
 }
 
-/// Invalid concurrency settings are errors rather than semaphore panics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigError {
     field: &'static str,
