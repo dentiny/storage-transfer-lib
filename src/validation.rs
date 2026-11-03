@@ -9,6 +9,16 @@ pub(crate) fn validate_copy(
     destination: &Operator,
     task: &ObjectTask,
 ) -> Result<()> {
+    validate_object(task)?;
+    validate_buckets(source, destination)?;
+    let read = source.info().capability();
+    let write = destination.info().capability();
+    validate_conditions(read, write)?;
+    validate_multipart(write)?;
+    validate_object_size(task.metadata.content_length(), write)
+}
+
+fn validate_object(task: &ObjectTask) -> Result<()> {
     if !task.metadata.is_file() || task.path.ends_with('/') {
         return Err(Error::UnsupportedEntry(task.path.clone()));
     }
@@ -17,6 +27,10 @@ pub(crate) fn validate_copy(
             "object key cannot be preserved by OpenDAL path normalization".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_buckets(source: &Operator, destination: &Operator) -> Result<()> {
     if source.info().root() != "/" || destination.info().root() != "/" {
         return Err(Error::InvalidRoot);
     }
@@ -25,13 +39,19 @@ pub(crate) fn validate_copy(
             "only S3-compatible buckets are supported".into(),
         ));
     }
-    let read = source.info().capability();
-    let write = destination.info().capability();
+    Ok(())
+}
+
+fn validate_conditions(read: Capability, write: Capability) -> Result<()> {
     if !read.read_with_if_match || !read.stat_with_if_match || !write.write_with_if_not_exists {
         return Err(Error::Unsupported(
             "conditional source reads and create-only writes are required".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_multipart(write: Capability) -> Result<()> {
     if !write.write_can_multi
         || !write.write_can_empty
         || write
@@ -45,7 +65,10 @@ pub(crate) fn validate_copy(
             "destination cannot use the configured multipart buffer size".into(),
         ));
     }
-    let size = task.metadata.content_length();
+    Ok(())
+}
+
+fn validate_object_size(size: u64, write: Capability) -> Result<()> {
     let max_size = (COPY_BUFFER_SIZE as u64 * MAX_COPY_PARTS).min(
         write
             .write_total_max_size
