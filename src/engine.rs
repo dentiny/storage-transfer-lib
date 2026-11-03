@@ -38,9 +38,6 @@ impl TransferEngine {
     // A mutable borrow allows one transfer at a time per engine.
     pub async fn run(&mut self, cancellation: &CancellationToken) -> Result<TransferProgress> {
         self.progress.send_replace(TransferProgress::default());
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
         let cancellation = cancellation.child_token();
         let (producer, queue) = BucketProducer::new(self.source.clone(), self.limits);
         let producer = producer.with_progress(self.progress.clone());
