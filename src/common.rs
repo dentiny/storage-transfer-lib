@@ -13,7 +13,6 @@ pub struct ObjectTask {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TransferProgress {
     pub listed_objects: u64,
-    pub listed_bytes: u64,
     // Counted only after the destination writer closes successfully.
     pub copied_objects: u64,
     pub copied_bytes: u64,

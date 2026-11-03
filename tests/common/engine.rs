@@ -84,10 +84,9 @@ impl TestTransfer {
         assert_eq!(summary.listed_objects, self.objects as u64);
         assert_eq!(summary.copied_objects, summary.listed_objects);
         assert_eq!(
-            summary.listed_bytes,
+            summary.copied_bytes,
             (0..self.objects).map(Self::size).sum::<usize>() as u64
         );
-        assert_eq!(summary.copied_bytes, summary.listed_bytes);
         assert_eq!(
             state.pages,
             self.objects.div_ceil(limits.list_page_size()).max(1)

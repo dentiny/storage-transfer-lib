@@ -67,7 +67,6 @@ impl BucketProducer {
                     if let Some(progress) = &self.progress {
                         progress.send_modify(|progress| {
                             progress.listed_objects += 1;
-                            progress.listed_bytes += metadata.content_length();
                         });
                     }
                     permit.send(ObjectTask { path, metadata });
