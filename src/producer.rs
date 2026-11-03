@@ -4,6 +4,8 @@ use tokio::sync::mpsc;
 
 use crate::{Error, ObjectTask, Result, TransferLimits};
 
+const MAX_LIST_PAGE_SIZE: usize = 1000;
+
 pub struct BucketProducer {
     source: Operator,
     sender: mpsc::Sender<ObjectTask>,
@@ -33,7 +35,7 @@ impl BucketProducer {
             .source
             .lister_with("/")
             .recursive(true)
-            .limit(self.sender.max_capacity().min(1000))
+            .limit(self.sender.max_capacity().min(MAX_LIST_PAGE_SIZE))
             .await?;
 
         loop {
