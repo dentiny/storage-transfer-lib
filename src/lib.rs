@@ -12,7 +12,7 @@ mod verify;
 mod worker;
 
 pub use common::{ObjectTask, TransferProgress};
-pub use config::TransferLimits;
+pub use config::{TransferConfig, TransferLimits};
 pub use copy::copy_object;
 pub use engine::TransferEngine;
 pub use error::{Error, Result};

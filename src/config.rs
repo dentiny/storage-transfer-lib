@@ -5,6 +5,9 @@ use tokio::sync::Semaphore;
 
 use crate::{Error, Result};
 
+const DEFAULT_MAX_QUEUED_OBJECTS: usize = 1024;
+const DEFAULT_MAX_ONGOING_HTTP_REQUESTS: usize = 32;
+pub(crate) const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub(crate) const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_MAX_RETRIES: usize = 2;
 pub(crate) const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -52,4 +55,38 @@ pub(crate) fn validate_limit(field: &'static str, value: usize) -> Result<NonZer
     NonZeroUsize::new(value)
         .filter(|n| n.get() <= Semaphore::MAX_PERMITS)
         .ok_or(Error::InvalidLimit { field, value })
+}
+
+impl Default for TransferLimits {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_QUEUED_OBJECTS,
+            DEFAULT_MAX_ONGOING_HTTP_REQUESTS,
+        )
+        .expect("default limits are valid")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransferConfig {
+    pub limits: TransferLimits,
+    pub operation_timeout: Duration,
+    pub io_timeout: Duration,
+    // Additional attempts after the initial attempt; zero disables retries.
+    pub max_retries: usize,
+    pub retry_delay: Duration,
+    pub max_retry_delay: Duration,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            limits: TransferLimits::default(),
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            io_timeout: DEFAULT_OPERATION_TIMEOUT,
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_delay: DEFAULT_RETRY_DELAY,
+            max_retry_delay: DEFAULT_MAX_RETRY_DELAY,
+        }
+    }
 }

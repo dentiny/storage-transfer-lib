@@ -2,7 +2,7 @@ use opendal::raw::normalize_path;
 use opendal::{Capability, Metadata, Operator};
 
 use crate::config::{COPY_BUFFER_SIZE, MAX_COPY_PARTS};
-use crate::{Error, ObjectTask, Result};
+use crate::{Error, ObjectTask, Result, TransferConfig};
 
 pub(crate) fn validate_copy(
     source: &Operator,
@@ -188,4 +188,23 @@ pub(crate) fn validate_destination<'a>(
         .etag()
         .filter(|etag| !etag.is_empty())
         .ok_or_else(|| Error::VerificationFailed(path.into()))
+}
+
+pub(crate) fn validate_config(config: &TransferConfig) -> Result<()> {
+    for (field, duration) in [
+        ("operation_timeout", config.operation_timeout),
+        ("io_timeout", config.io_timeout),
+        ("retry_delay", config.retry_delay),
+        ("max_retry_delay", config.max_retry_delay),
+    ] {
+        if duration.is_zero() || std::time::Instant::now().checked_add(duration).is_none() {
+            return Err(Error::InvalidConfig(field));
+        }
+    }
+    if config.max_retry_delay < config.retry_delay {
+        return Err(Error::InvalidConfig(
+            "max_retry_delay must be >= retry_delay",
+        ));
+    }
+    Ok(())
 }

@@ -5,20 +5,25 @@ use sha2::{Digest, Sha256};
 use crate::common::Sha256Digest;
 use crate::config::COPY_BUFFER_SIZE;
 use crate::operator::with_policies;
-use crate::validation::{validate_copy, validate_metadata, validate_source};
+use crate::validation::{validate_config, validate_copy, validate_metadata, validate_source};
 use crate::verify::verify_object;
-use crate::{CancellationToken, Error, ObjectTask, Result};
+use crate::{
+    CancellationToken, Error, HttpConcurrencyLimitLayer, ObjectTask, Result, TransferConfig,
+};
 
-// Both operators must share the HTTP limiter. Retry/timeout policies are applied here.
+// Apply a shared HTTP limiter and retry/timeout policies to this copy.
 pub async fn copy_object(
     source: &Operator,
     destination: &Operator,
     task: &ObjectTask,
+    config: &TransferConfig,
     cancellation: &CancellationToken,
 ) -> Result<()> {
+    validate_config(config)?;
+    let layer = HttpConcurrencyLimitLayer::new(config.limits.max_ongoing_http_requests())?;
     copy_prepared(
-        &with_policies(source.clone()),
-        &with_policies(destination.clone()),
+        &with_policies(source.clone().layer(layer.clone()), config),
+        &with_policies(destination.clone().layer(layer), config),
         task,
         cancellation,
     )

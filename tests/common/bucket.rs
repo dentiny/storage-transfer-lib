@@ -7,8 +7,8 @@ use opendal::{
     OperationContext, Operator, raw::BytesContentRange, services::S3,
 };
 use storage_transfer_lib::{
-    CancellationToken, HttpConcurrencyLimitLayer, ObjectTask, Result, TransferEngine,
-    TransferLimits, copy_object,
+    CancellationToken, ObjectTask, Result, TransferConfig, TransferEngine, TransferLimits,
+    copy_object,
 };
 use tokio::sync::Notify;
 
@@ -115,13 +115,20 @@ impl TestBucket {
 
     pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
         let (source, destination) = self.operators();
-        TransferEngine::new(source, destination, limits).unwrap()
+        TransferEngine::new(
+            source,
+            destination,
+            TransferConfig {
+                limits,
+                ..TransferConfig::default()
+            },
+        )
+        .unwrap()
     }
 
     // Copy one fixture object with a single HTTP permit shared by both operators.
     pub async fn copy(&self, index: usize) -> Result<()> {
         let (source, destination) = self.operators();
-        let layer = HttpConcurrencyLimitLayer::new(1).unwrap();
         let mut metadata = MetadataBuilder::file(self.sizes[index] as u64);
         metadata.etag(ETAG);
         let task = ObjectTask {
@@ -129,9 +136,13 @@ impl TestBucket {
             metadata: metadata.build(),
         };
         copy_object(
-            &source.layer(layer.clone()),
-            &destination.layer(layer),
+            &source,
+            &destination,
             &task,
+            &TransferConfig {
+                limits: TransferLimits::new(1, 1).unwrap(),
+                ..TransferConfig::default()
+            },
             &CancellationToken::new(),
         )
         .await
