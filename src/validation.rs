@@ -10,12 +10,29 @@ pub(crate) fn validate_copy(
     task: &ObjectTask,
 ) -> Result<()> {
     validate_object(task)?;
+    validate_operators(source, destination)?;
+    validate_object_size(
+        task.metadata.content_length(),
+        destination.info().capability(),
+    )
+}
+
+pub(crate) fn validate_transfer(source: &Operator, destination: &Operator) -> Result<()> {
+    validate_operators(source, destination)?;
+    if !source.info().capability().list {
+        return Err(Error::Unsupported(
+            "source must support bucket listing".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_operators(source: &Operator, destination: &Operator) -> Result<()> {
     validate_buckets(source, destination)?;
     let read = source.info().capability();
     let write = destination.info().capability();
     validate_conditions(read, write)?;
-    validate_multipart(write)?;
-    validate_object_size(task.metadata.content_length(), write)
+    validate_multipart(write)
 }
 
 fn validate_object(task: &ObjectTask) -> Result<()> {
