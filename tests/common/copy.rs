@@ -25,7 +25,9 @@ const METADATA: [(&str, &str); 5] = [
 
 #[derive(Default)]
 struct State {
+    // Total payload bytes validated by the fake destination across PUTs and uploaded parts.
     written: usize,
+    // Number of source range GET requests served by the fake transport.
     reads: usize,
     parts: usize,
     completed: bool,
