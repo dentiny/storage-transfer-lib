@@ -4,6 +4,7 @@ pub mod copy;
 mod error;
 pub mod http_limit;
 pub mod producer;
+mod validation;
 
 pub use common::ObjectTask;
 pub use config::TransferLimits;
