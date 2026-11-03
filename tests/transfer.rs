@@ -108,7 +108,7 @@ async fn retries_both_operators() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancellation_bounds_cleanup_and_preserves_abort_errors() {
+async fn cancellation_attempts_cleanup_and_preserves_first_error() {
     for fault in [Fault::AbortDenied, Fault::AbortHang] {
         let bucket = TestBucket::new(&[BUFFER_SIZE + 13, 17, 17, 17], fault);
         let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
@@ -120,7 +120,7 @@ async fn cancellation_bounds_cleanup_and_preserves_abort_errors() {
             _ = bucket.read_started.notified() => {}
         }
         cancellation.cancel();
-        assert!(matches!(run.await, Err(Error::Cleanup { .. })));
+        assert!(matches!(run.await, Err(Error::Cancelled)));
         bucket.assert_failures(
             0,
             0,

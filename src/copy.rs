@@ -97,13 +97,8 @@ async fn write_data(
 }
 
 async fn abort(writer: &mut Writer, original: Error) -> Result<()> {
-    match writer.abort().await {
-        Ok(()) => Err(original),
-        Err(cleanup) => Err(Error::Cleanup {
-            original: Box::new(original),
-            cleanup,
-        }),
-    }
+    let _ = writer.abort().await;
+    Err(original)
 }
 
 fn write_options(metadata: &Metadata) -> WriteOptions {

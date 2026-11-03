@@ -19,7 +19,6 @@ enum Record<'a> {
         bytes: u64,
         status: &'static str,
         error: Option<String>,
-        cleanup_failed: bool,
     },
     Finished {
         progress: TransferProgress,
@@ -44,7 +43,6 @@ impl Report {
             bytes: task.metadata.content_length(),
             status: result.as_ref().err().map_or("copied", status),
             error: result.as_ref().err().map(ToString::to_string),
-            cleanup_failed: matches!(result, Err(Error::Cleanup { .. })),
         })
         .await
     }
@@ -74,7 +72,6 @@ impl Report {
 fn status(error: &Error) -> &'static str {
     match error {
         Error::Cancelled => "cancelled",
-        Error::Cleanup { original, .. } => status(original),
         _ => "failed",
     }
 }

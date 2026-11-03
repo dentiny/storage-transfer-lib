@@ -94,7 +94,7 @@ impl TransferEngine {
             let result = result.unwrap_or_else(|error| Err(Error::Task(error)));
             if let Err(error) = result {
                 cancellation.cancel();
-                if failure.is_none() || matches!(error, Error::Cleanup { .. }) {
+                if failure.is_none() {
                     failure = Some(error);
                 }
             }
