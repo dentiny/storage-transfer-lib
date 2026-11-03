@@ -14,20 +14,17 @@ async fn lists_all_pages_with_queue_backpressure() {
         if total > 0 {
             assert!(poll!(&mut run).is_pending());
             assert_eq!(queue.len(), 2);
-            assert_eq!(bucket.request_count(), 1);
+            assert_eq!(bucket.request_count(), 2);
             assert!(poll!(&mut run).is_pending());
-            assert_eq!(bucket.request_count(), 1);
+            assert_eq!(bucket.request_count(), 2);
         }
         let (result, ()) = tokio::join!(run, async {
-            for index in 0..total {
+            for index in (0..total).filter(|index| *index != 1) {
                 let task = queue.recv().await.unwrap();
                 assert_eq!(task.path, TestBucket::key(index));
                 assert_eq!(task.metadata.etag(), Some(format!("etag-{index}").as_str()));
-                if index == 1 {
-                    assert!(task.metadata.is_dir());
-                } else {
-                    assert_eq!(task.metadata.content_length(), index as u64);
-                }
+                assert!(task.metadata.is_file());
+                assert_eq!(task.metadata.content_length(), index as u64);
             }
             assert!(queue.recv().await.is_none());
         });
@@ -42,13 +39,11 @@ async fn reports_failure_after_a_successful_page() {
     bucket.fail_on_page = Some(1);
     let (producer, mut queue) = bucket.producer(2);
     let mut run = Box::pin(producer.run());
-    assert!(poll!(&mut run).is_pending());
-    assert_eq!(queue.try_recv().unwrap().path, "empty");
     assert!(matches!(
         poll!(&mut run),
         std::task::Poll::Ready(Err(Error::Storage(_)))
     ));
-    assert_eq!(queue.try_recv().unwrap().path, "nested/");
+    assert_eq!(queue.try_recv().unwrap().path, "empty");
     assert!(queue.is_closed());
     assert!(queue.is_empty());
 }
@@ -67,6 +62,9 @@ async fn closing_queue_cancels_listing_and_waiting_for_capacity() {
             poll!(&mut run),
             std::task::Poll::Ready(Err(Error::ConsumerClosed))
         ));
-        assert_eq!(bucket.request_count(), 1);
+        assert_eq!(
+            bucket.request_count(),
+            if blocked_page.is_some() { 1 } else { 2 }
+        );
     }
 }

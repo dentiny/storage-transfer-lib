@@ -55,11 +55,11 @@ impl BucketProducer {
                 return Ok(());
             };
             let (path, metadata) = entry.into_parts();
-            if metadata.mode() == EntryMode::Unknown {
-                return Err(Error::UnsupportedEntry(path));
+            match metadata.mode() {
+                EntryMode::FILE => permit.send(ObjectTask { path, metadata }),
+                EntryMode::DIR => continue,
+                EntryMode::Unknown => return Err(Error::UnsupportedEntry(path)),
             }
-            // Retain directory-marker entries as well as files, including zero-byte objects.
-            permit.send(ObjectTask { path, metadata });
         }
     }
 }
