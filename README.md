@@ -119,13 +119,3 @@ Progress includes `listed_objects`, `copied_objects`, and `copied_bytes`. Copied
 ```
 
 Object statuses are `copied`, `failed`, or `cancelled`. A failed run can leave listed objects unattempted; the report is not a complete bucket inventory or a resume database. Process termination can leave a partial report without a `finished` record.
-
-## Current behavior and limits
-
-- Copies current file objects at the same keys. Directory entries, including keys ending in `/`, are skipped. Keys that OpenDAL would normalize are rejected.
-- Uses create-only destination writes. Existing objects cause an error; there is no overwrite, skip-existing, or resume mode. No source objects, completed destination objects, or buckets are deleted.
-- Reads and writes in fixed 8 MiB chunks. The 10,000-part cap limits an object to 78.125 GiB (83,886,080,000 bytes), or a smaller backend limit.
-- Verifies content by rereading the entire destination in bounded ranges, adding one full destination read. Preserves content type, encoding, disposition, cache control, and user metadata; ACLs, tags, and historical versions are outside the copy scope.
-- Stops on the first observed task error and attempts cleanup of this run's unfinished uploads. A lost commit response can produce an error even if the destination object was committed.
-- Use a quiescent source for a complete bucket transfer. Conditional reads detect supported source changes, but listing and copying do not form a bucket snapshot.
-- Tests use fake S3 transports. Real OCI integration qualification is still pending. The repository currently provides a library; there is no CLI or HTTP service.
