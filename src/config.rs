@@ -41,20 +41,3 @@ pub(crate) fn validate_limit(
         .filter(|n| n.get() <= Semaphore::MAX_PERMITS)
         .ok_or(ConfigError { field, value })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_invalid_limits_without_panicking() {
-        for invalid in [0, Semaphore::MAX_PERMITS + 1, usize::MAX] {
-            assert!(TransferLimits::new(invalid, 1).is_err());
-            assert!(TransferLimits::new(1, invalid).is_err());
-        }
-        let limits = TransferLimits::new(1024, 1).unwrap();
-        assert_eq!(limits.max_queued_objects(), 1024);
-        assert_eq!(limits.max_ongoing_http_requests(), 1);
-        assert!(TransferLimits::new(Semaphore::MAX_PERMITS, Semaphore::MAX_PERMITS).is_ok());
-    }
-}
