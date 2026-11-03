@@ -5,6 +5,8 @@ use tokio::sync::Semaphore;
 use crate::{Error, Result};
 
 const MAX_LIST_PAGE_SIZE: usize = 1000;
+pub(crate) const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_COPY_PARTS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {

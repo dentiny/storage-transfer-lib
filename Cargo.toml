@@ -8,14 +8,16 @@ description = "Bounded bucket-to-bucket transfers using Apache OpenDAL"
 repository = "https://github.com/dentiny/storage-transfer-lib"
 
 [dependencies]
-futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
-http = "=1.5.0"
-opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls", "services-s3"] }
-tokio = { version = "=1.53.3", features = ["sync", "macros"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+http = "1.5.0"
+opendal = { version = "0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls", "services-s3"] }
+tokio = { version = "1.53.3", features = ["sync", "macros"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 
 [dev-dependencies]
-futures-util = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
-tokio = { version = "=1.53.3", features = ["macros", "rt", "time"] }
+form_urlencoded = "1.2.2"
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
+tokio = { version = "1.53.3", features = ["macros", "rt"] }
 
 [lints.rust]
 unsafe_code = "forbid"

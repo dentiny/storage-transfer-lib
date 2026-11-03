@@ -4,11 +4,21 @@ use tokio::sync::Semaphore;
 
 #[derive(Debug)]
 pub enum Error {
-    InvalidLimit { field: &'static str, value: usize },
+    InvalidLimit {
+        field: &'static str,
+        value: usize,
+    },
     InvalidRoot,
     UnsupportedEntry(String),
     Storage(opendal::Error),
     ConsumerClosed,
+    Unsupported(String),
+    SourceChanged(String),
+    Cancelled,
+    Cleanup {
+        original: Box<Error>,
+        cleanup: opendal::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,9 +33,18 @@ impl fmt::Display for Error {
                     Semaphore::MAX_PERMITS
                 )
             }
-            Self::InvalidRoot => write!(f, "source operator must be rooted at the bucket root (/)"),
+            Self::InvalidRoot => write!(f, "operators must be rooted at the bucket root (/)"),
             Self::UnsupportedEntry(path) => write!(f, "unknown entry type: {path}"),
             Self::Storage(error) => write!(f, "storage operation failed: {error}"),
+            Self::Unsupported(reason) => write!(f, "unsupported copy: {reason}"),
+            Self::SourceChanged(path) => write!(
+                f,
+                "source object changed or returned an invalid range: {path}"
+            ),
+            Self::Cancelled => write!(f, "copy cancelled"),
+            Self::Cleanup { original, cleanup } => {
+                write!(f, "{original}; aborting the upload also failed: {cleanup}")
+            }
             Self::ConsumerClosed => {
                 write!(f, "object queue receiver closed before listing completed")
             }
@@ -37,6 +56,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Storage(error) => Some(error),
+            Self::Cleanup { original, .. } => Some(original.as_ref()),
             _ => None,
         }
     }
