@@ -1,6 +1,5 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use futures_util::Stream;
@@ -14,8 +13,6 @@ use crate::config::{ConfigError, validate_limit};
 #[derive(Clone, Debug)]
 pub struct HttpConcurrencyLimitLayer {
     semaphore: Arc<Semaphore>,
-    ongoing: Arc<AtomicUsize>,
-    limit: usize,
 }
 
 impl HttpConcurrencyLimitLayer {
@@ -23,26 +20,13 @@ impl HttpConcurrencyLimitLayer {
         let limit = validate_limit("max_ongoing_http_requests", max_ongoing_http_requests)?.get();
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(limit)),
-            ongoing: Arc::new(AtomicUsize::new(0)),
-            limit,
         })
-    }
-
-    pub fn ongoing_http_requests(&self) -> usize {
-        // A fair semaphore can reserve a released permit for an unpolled waiter.
-        // Such a waiter has not dispatched a request and must not be counted.
-        self.ongoing.load(Ordering::Relaxed)
-    }
-
-    pub fn max_ongoing_http_requests(&self) -> usize {
-        self.limit
     }
 
     pub fn wrap(&self, inner: HttpTransporter) -> HttpTransporter {
         HttpTransporter::new(LimitedTransport {
             inner,
             semaphore: self.semaphore.clone(),
-            ongoing: self.ongoing.clone(),
         })
     }
 }
@@ -56,7 +40,6 @@ impl Layer for HttpConcurrencyLimitLayer {
 struct LimitedTransport {
     inner: HttpTransporter,
     semaphore: Arc<Semaphore>,
-    ongoing: Arc<AtomicUsize>,
 }
 
 impl HttpTransport for LimitedTransport {
@@ -69,11 +52,6 @@ impl HttpTransport for LimitedTransport {
             .acquire_owned()
             .await
             .expect("private semaphore is never closed");
-        self.ongoing.fetch_add(1, Ordering::Relaxed);
-        let permit = RequestPermit {
-            ongoing: self.ongoing.clone(),
-            _permit: permit,
-        };
         let response = self.inner.fetch(request).await?;
         let (parts, body) = response.into_parts();
         let body = body.map_inner(|stream| {
@@ -90,19 +68,7 @@ impl HttpTransport for LimitedTransport {
 // admission to the next request. EOF/error also explicitly tears it down first.
 struct PermitStream<S> {
     inner: Option<S>,
-    permit: Option<RequestPermit>,
-}
-
-struct RequestPermit {
-    ongoing: Arc<AtomicUsize>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Drop for RequestPermit {
-    fn drop(&mut self) {
-        // Decrement before the semaphore field drops and wakes another request.
-        self.ongoing.fetch_sub(1, Ordering::Relaxed);
-    }
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl<S> Stream for PermitStream<S>

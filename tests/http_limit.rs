@@ -157,6 +157,20 @@ async fn bounded<T>(f: impl Future<Output = T>) -> T {
         .expect("operation deadlocked")
 }
 
+async fn assert_can_dispatch(transport: &HttpTransporter, harness: &mut Harness) {
+    let mut fetch = Box::pin(transport.fetch(request()));
+    assert!(poll!(&mut fetch).is_pending());
+    harness.next().await.complete("");
+    bounded(fetch)
+        .await
+        .unwrap()
+        .into_body()
+        .to_buffer()
+        .await
+        .unwrap();
+    assert_eq!(harness.active(), 0);
+}
+
 #[tokio::test]
 async fn shared_transports_hold_permits_after_headers_and_release_at_eof() {
     for limit in [1, 3] {
@@ -177,26 +191,24 @@ async fn shared_transports_hold_permits_after_headers_and_release_at_eof() {
         let mut waiting = Box::pin(destination.fetch(request()));
         assert!(poll!(&mut waiting).is_pending());
         assert!(harness.calls.try_recv().is_err());
-        assert_eq!(layer.ongoing_http_requests(), limit);
+        assert_eq!(harness.active(), limit);
 
         senders.remove(0).send(Ok(Buffer::from("payload"))).unwrap(); // Sender drops: payload then EOF.
         assert_eq!(bodies[0].read().await.unwrap().len(), 7);
-        assert_eq!(layer.ongoing_http_requests(), limit);
+        assert_eq!(harness.active(), limit);
         assert!(bodies[0].read().await.unwrap().is_empty());
         // Keep the exhausted HttpBody alive: EOF itself must free capacity.
         assert_eq!(harness.active(), limit - 1);
-        assert_eq!(layer.ongoing_http_requests(), limit - 1);
         assert!(poll!(&mut waiting).is_pending());
         harness.next().await.complete("");
         let mut response = waiting.await.unwrap().into_body();
         response.to_buffer().await.unwrap();
-        assert_eq!(layer.ongoing_http_requests(), limit - 1);
+        assert_eq!(harness.active(), limit - 1);
         // Re-polling EOF and dropping exhausted bodies must not release twice.
         bodies[0].read().await.unwrap();
-        assert_eq!(layer.ongoing_http_requests(), limit - 1);
+        assert_eq!(harness.active(), limit - 1);
         drop(bodies);
         drop(senders);
-        assert_eq!(layer.ongoing_http_requests(), 0);
         assert_eq!(harness.active(), 0);
         assert_eq!(harness.peak(), limit);
     }
@@ -211,7 +223,6 @@ async fn transport_and_body_errors_release_capacity_and_fuse_the_body() {
     assert!(poll!(&mut fetch).is_pending());
     assert!(harness.next().await.reply.send(Err(failure())).is_ok());
     assert!(fetch.await.is_err());
-    assert_eq!(layer.ongoing_http_requests(), 0);
     assert_eq!(harness.active(), 0);
 
     let mut fetch = Box::pin(transport.fetch(request()));
@@ -227,10 +238,10 @@ async fn transport_and_body_errors_release_capacity_and_fuse_the_body() {
         .unwrap();
     assert_eq!(body.read().await.unwrap().len(), 7);
     assert!(body.read().await.is_err());
-    assert_eq!(layer.ongoing_http_requests(), 0);
     assert_eq!(harness.active(), 0);
     assert!(body.read().await.unwrap().is_empty());
     assert!(sender.send(Ok(Buffer::new())).is_err());
+    assert_can_dispatch(&transport, &mut harness).await;
 }
 
 #[tokio::test]
@@ -243,8 +254,8 @@ async fn truncated_body_releases_at_eof_even_when_httpbody_reports_length_error(
     drop(harness.next().await.respond(StatusCode::OK, Some(10)));
     let mut body = fetch.await.unwrap().into_body();
     assert!(body.to_buffer().await.is_err());
-    assert_eq!(layer.ongoing_http_requests(), 0);
     assert_eq!(harness.active(), 0);
+    assert_can_dispatch(&transport, &mut harness).await;
 }
 
 #[tokio::test]
@@ -261,7 +272,6 @@ async fn cancellation_while_waiting_dispatching_and_reading_leaks_no_permits() {
     assert_eq!(harness.counts.dispatched.load(Ordering::SeqCst), 1);
     drop(active); // cancellation before response headers
     assert!(call.reply.is_closed());
-    assert_eq!(layer.ongoing_http_requests(), 0);
     assert_eq!(harness.active(), 0);
 
     let mut fetch = Box::pin(transport.fetch(request()));
@@ -271,17 +281,16 @@ async fn cancellation_while_waiting_dispatching_and_reading_leaks_no_permits() {
     let mut read = Box::pin(body.read());
     assert!(poll!(&mut read).is_pending());
     drop(read); // cancelling a borrowed read retains the still-live response
-    assert_eq!(layer.ongoing_http_requests(), 1);
+    assert_eq!(harness.active(), 1);
     drop(body); // cancelling the response releases the request
     assert!(sender.is_closed());
-    assert_eq!(layer.ongoing_http_requests(), 0);
     assert_eq!(harness.active(), 0);
 
     let mut fetch = Box::pin(transport.fetch(request()));
     assert!(poll!(&mut fetch).is_pending());
     harness.next().await.complete("");
     drop(fetch.await.unwrap());
-    assert_eq!(layer.ongoing_http_requests(), 0);
+    assert_eq!(harness.active(), 0);
 }
 
 fn s3(bucket: &str, transport: HttpTransporter, layer: &HttpConcurrencyLimitLayer) -> Operator {
@@ -324,7 +333,7 @@ async fn real_s3_operators_share_the_limit_for_reads_and_stats() {
     drop(call.respond(StatusCode::OK, Some(0)));
     bounded(stat).await.unwrap();
     assert_eq!(harness.peak(), 1);
-    assert_eq!(layer.ongoing_http_requests(), 0);
+    assert_eq!(harness.active(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -342,7 +351,7 @@ async fn retry_backoff_releases_the_permit_and_retry_reacquires_it() {
     assert!(poll!(&mut read).is_pending());
     assert!(harness.next().await.reply.send(Err(failure())).is_ok());
     assert!(poll!(&mut read).is_pending());
-    assert_eq!(layer.ongoing_http_requests(), 0);
+    assert_eq!(harness.active(), 0);
 
     let mut stat = Box::pin(async { destination.stat("file").await });
     assert!(poll!(&mut stat).is_pending());
@@ -360,7 +369,7 @@ async fn retry_backoff_releases_the_permit_and_retry_reacquires_it() {
     assert_eq!(read.await.unwrap().to_vec(), b"retried");
     assert_eq!(harness.counts.dispatched.load(Ordering::SeqCst), 3);
     assert_eq!(harness.peak(), 1);
-    assert_eq!(layer.ongoing_http_requests(), 0);
+    assert_eq!(harness.active(), 0);
 }
 
 #[tokio::test]
@@ -389,7 +398,6 @@ async fn real_s3_multipart_requests_and_listing_share_the_http_budget() {
         // The upstream writer allows two uploads, but only one reaches transport.
         assert!(harness.calls.try_recv().is_err());
         assert_eq!(harness.active(), 1);
-        assert_eq!(layer.ongoing_http_requests(), 1);
         let query = call.request.uri().query().unwrap_or_default();
         if query == "uploads" {
             initiated += 1;
@@ -417,7 +425,7 @@ async fn real_s3_multipart_requests_and_listing_share_the_http_budget() {
     bounded(list).await.unwrap().unwrap();
     assert_eq!((initiated, parts, completed, listed), (1, 2, 1, 1));
     assert_eq!(harness.peak(), 1);
-    assert_eq!(layer.ongoing_http_requests(), 0);
+    assert_eq!(harness.active(), 0);
 }
 
 #[test]
@@ -471,6 +479,5 @@ async fn concurrent_callers_across_transports_never_exceed_the_global_limit() {
         assert_eq!(harness.counts.dispatched.load(Ordering::SeqCst), 32);
         assert_eq!(harness.peak(), limit);
         assert_eq!(harness.active(), 0);
-        assert_eq!(layer.ongoing_http_requests(), 0);
     }
 }
