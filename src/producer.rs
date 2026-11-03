@@ -1,14 +1,8 @@
 use futures_util::TryStreamExt;
-use opendal::{EntryMode, Metadata, Operator};
+use opendal::{EntryMode, Operator};
 use tokio::sync::mpsc;
 
-use crate::{Error, Result, TransferLimits};
-
-#[derive(Clone, Debug)]
-pub struct ObjectTask {
-    pub path: String,
-    pub metadata: Metadata,
-}
+use crate::{Error, ObjectTask, Result, TransferLimits};
 
 pub struct BucketProducer {
     source: Operator,
