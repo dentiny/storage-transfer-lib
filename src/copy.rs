@@ -2,6 +2,7 @@ use opendal::options::WriteOptions;
 use opendal::{Metadata, Operator, Reader, Writer};
 use sha2::{Digest, Sha256};
 
+use crate::common::Sha256Digest;
 use crate::config::COPY_BUFFER_SIZE;
 use crate::operator::with_policies;
 use crate::validation::{validate_copy, validate_metadata, validate_source};
@@ -68,7 +69,7 @@ async fn write_data(
     writer: &mut Writer,
     task: &ObjectTask,
     cancellation: &CancellationToken,
-) -> Result<[u8; 32]> {
+) -> Result<Sha256Digest> {
     let mut hash = Sha256::new();
     let size = task.metadata.content_length();
     let mut offset = 0;

@@ -1,6 +1,7 @@
 use opendal::{Metadata, Operator};
 use sha2::{Digest, Sha256};
 
+use crate::common::Sha256Digest;
 use crate::config::COPY_BUFFER_SIZE;
 use crate::validation::validate_destination;
 use crate::{CancellationToken, Error, Result};
@@ -9,7 +10,7 @@ pub(crate) async fn verify_object(
     destination: &Operator,
     path: &str,
     source: &Metadata,
-    expected: [u8; 32],
+    expected: Sha256Digest,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     tokio::select! {
@@ -30,7 +31,7 @@ pub(crate) async fn verify_object(
                 for chunk in buffer { hash.update(chunk); }
                 offset = end;
             }
-            let actual: [u8; 32] = hash.finalize().into();
+            let actual: Sha256Digest = hash.finalize().into();
             if actual != expected { return Err(Error::VerificationFailed(path.into())); }
             Ok(())
         } => result,

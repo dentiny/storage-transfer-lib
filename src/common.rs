@@ -1,5 +1,8 @@
 use opendal::Metadata;
 
+// SHA-256 digest of an object's contents, used to verify the copied data.
+pub(crate) type Sha256Digest = [u8; 32];
+
 // Describes one file object queued for copying; contains no object data.
 // The producer filters out directory entries before creating tasks.
 #[derive(Clone, Debug)]
