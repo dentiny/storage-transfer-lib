@@ -16,11 +16,6 @@ pub enum Error {
     SourceChanged(String),
     Cancelled,
     VerificationFailed(String),
-    CommitUnknown {
-        path: String,
-        close: opendal::Error,
-        error: Box<Error>,
-    },
     Report(std::io::Error),
     Secondary {
         original: Box<Error>,
@@ -55,10 +50,6 @@ impl fmt::Display for Error {
             ),
             Self::Cancelled => write!(f, "transfer cancelled"),
             Self::VerificationFailed(path) => write!(f, "destination verification failed: {path}"),
-            Self::CommitUnknown { path, close, error } => write!(
-                f,
-                "write completion could not be confirmed for {path}: {close}; verification: {error}"
-            ),
             Self::Report(error) => write!(f, "transfer report failed: {error}"),
             Self::Secondary {
                 original,
@@ -83,7 +74,6 @@ impl std::error::Error for Error {
             Self::Storage(error) => Some(error),
             Self::Task(error) => Some(error),
             Self::Report(error) => Some(error),
-            Self::CommitUnknown { error, .. } => Some(error.as_ref()),
             Self::Secondary { original, .. } => Some(original.as_ref()),
             Self::Cleanup { original, .. } => Some(original.as_ref()),
             _ => None,

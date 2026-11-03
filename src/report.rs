@@ -74,7 +74,6 @@ impl Report {
 fn status(error: &Error) -> &'static str {
     match error {
         Error::Cancelled => "cancelled",
-        Error::CommitUnknown { .. } => "uncertain",
         Error::Cleanup { original, .. } => status(original),
         _ => "failed",
     }

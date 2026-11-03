@@ -31,7 +31,6 @@ pub enum Fault {
     BlockRead,
     ExistingDestination,
     Throttled,
-    LostCommit,
     CorruptDestination,
     UnavailableDestination,
     SourceChanged,
@@ -49,7 +48,6 @@ struct ObjectState {
     parts: usize,
     completed: bool,
     aborted: bool,
-    lost_response: bool,
     // Existing bytes used to verify create-only writes; None means the destination is absent.
     existing: Option<&'static [u8]>,
 }
@@ -497,21 +495,6 @@ impl HttpTransport for TestBucket {
                 request.uri()
             ),
         };
-        if matches!(self.fault, Fault::LostCommit)
-            && response.status() == StatusCode::OK
-            && let ["", "destination", "objects", index] = path.as_slice()
-        {
-            let mut state = self.state.lock().unwrap();
-            let object = &mut state.objects[index.parse::<usize>().unwrap()];
-            if object.completed && !object.lost_response {
-                object.lost_response = true;
-                return Err(opendal::Error::new(
-                    opendal::ErrorKind::Unexpected,
-                    "lost commit response",
-                )
-                .set_temporary());
-            }
-        }
         let (parts, body) = response.into_parts();
         let size = body.len() as u64;
         let body = stream::iter([Ok(body)]).map(move |chunk| {

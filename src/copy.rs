@@ -3,7 +3,7 @@ use opendal::{Metadata, Operator, Reader, Writer};
 use sha2::{Digest, Sha256};
 
 use crate::config::COPY_BUFFER_SIZE;
-use crate::operator::{close, with_policies};
+use crate::operator::with_policies;
 use crate::validation::{validate_copy, validate_metadata, validate_source};
 use crate::verify::verify_object;
 use crate::{CancellationToken, Error, ObjectTask, Result};
@@ -57,27 +57,10 @@ pub(crate) async fn copy_prepared(
     };
 
     // Drain close under the operator's retry/timeout policy before using the writer again.
-    let (result, retried) = close(&mut writer).await;
-    match result {
-        Ok(_) => verify_object(destination, &task.path, &metadata, digest, cancellation).await,
-        Err(close_error) if retried => {
-            match verify_object(destination, &task.path, &metadata, digest, cancellation).await {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    abort(
-                        &mut writer,
-                        Error::CommitUnknown {
-                            path: task.path.clone(),
-                            close: close_error,
-                            error: Box::new(error),
-                        },
-                    )
-                    .await
-                }
-            }
-        }
-        Err(error) => abort(&mut writer, error.into()).await,
+    if let Err(error) = writer.close().await {
+        return abort(&mut writer, error.into()).await;
     }
+    verify_object(destination, &task.path, &metadata, digest, cancellation).await
 }
 
 async fn write_data(

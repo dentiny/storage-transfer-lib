@@ -96,17 +96,14 @@ async fn cancellation_stops_blocked_requests_and_waiting_workers() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn retries_both_operators_and_reconciles_lost_commit_responses() {
-    for fault in [Fault::Throttled, Fault::LostCommit] {
-        for size in [17, BUFFER_SIZE + 13] {
-            let bucket = TestBucket::new(&[size], fault);
-            let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
-            let summary = engine.run(&CancellationToken::new()).await.unwrap();
-            assert_eq!(summary.copied_objects, 1);
-            bucket.assert_completed(1);
-            let failures = usize::from(matches!(fault, Fault::Throttled));
-            bucket.assert_failures(failures, failures, 0);
-        }
+async fn retries_both_operators() {
+    for size in [17, BUFFER_SIZE + 13] {
+        let bucket = TestBucket::new(&[size], Fault::Throttled);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let summary = engine.run(&CancellationToken::new()).await.unwrap();
+        assert_eq!(summary.copied_objects, 1);
+        bucket.assert_completed(1);
+        bucket.assert_failures(1, 1, 0);
     }
 }
 
@@ -144,7 +141,7 @@ async fn reports_verified_success_and_incomplete_objects() {
     for (fault, expected) in [
         (Fault::None, "copied"),
         (Fault::CorruptDestination, "failed"),
-        (Fault::UnavailableDestination, "uncertain"),
+        (Fault::UnavailableDestination, "failed"),
         (Fault::SourceChanged, "failed"),
         (Fault::TimeoutRead, "failed"),
     ] {
@@ -161,7 +158,7 @@ async fn reports_verified_success_and_incomplete_objects() {
                 assert!(matches!(result, Err(Error::VerificationFailed(_))))
             }
             Fault::UnavailableDestination => {
-                assert!(matches!(result, Err(Error::CommitUnknown { .. })));
+                assert!(matches!(result, Err(Error::Storage(_))));
                 bucket.assert_failures(0, 3, 0);
             }
             Fault::TimeoutRead => {
