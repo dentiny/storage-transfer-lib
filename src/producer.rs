@@ -2,7 +2,7 @@ use futures_util::TryStreamExt;
 use opendal::{EntryMode, Metadata, Operator};
 use tokio::sync::mpsc;
 
-use crate::{ProducerError, TransferLimits};
+use crate::{Error, Result, TransferLimits};
 
 #[derive(Clone, Debug)]
 pub struct ObjectTask {
@@ -23,17 +23,17 @@ impl BucketProducer {
 
     // Run alongside the consumer. Queue closure alone does not mean listing succeeded;
     // the caller must also check this result. Dropping this future stops production.
-    pub async fn run(self) -> Result<(), ProducerError> {
+    pub async fn run(self) -> Result<()> {
         tokio::select! {
             biased;
-            _ = self.sender.closed() => Err(ProducerError::ConsumerClosed),
+            _ = self.sender.closed() => Err(Error::ConsumerClosed),
             result = self.produce() => result,
         }
     }
 
-    async fn produce(&self) -> Result<(), ProducerError> {
+    async fn produce(&self) -> Result<()> {
         if self.source.info().root() != "/" {
-            return Err(ProducerError::InvalidRoot);
+            return Err(Error::InvalidRoot);
         }
         let mut lister = self
             .source
@@ -48,13 +48,13 @@ impl BucketProducer {
                 .sender
                 .reserve()
                 .await
-                .map_err(|_| ProducerError::ConsumerClosed)?;
+                .map_err(|_| Error::ConsumerClosed)?;
             let Some(entry) = lister.try_next().await? else {
                 return Ok(());
             };
             let (path, metadata) = entry.into_parts();
             if metadata.mode() == EntryMode::Unknown {
-                return Err(ProducerError::UnsupportedEntry(path));
+                return Err(Error::UnsupportedEntry(path));
             }
             // Retain directory-marker entries as well as files, including zero-byte objects.
             permit.send(ObjectTask { path, metadata });

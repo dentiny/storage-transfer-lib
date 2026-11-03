@@ -5,10 +5,10 @@ use std::task::{Context, Poll};
 use futures_util::Stream;
 use http::{Request, Response};
 use opendal::raw::{Layer, Servicer};
-use opendal::{Buffer, HttpBody, HttpTransport, HttpTransporter, OperationContext, Result};
+use opendal::{Buffer, HttpBody, HttpTransport, HttpTransporter, OperationContext};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::ConfigError;
+use crate::Result;
 use crate::config::validate_limit;
 
 #[derive(Clone, Debug)]
@@ -17,7 +17,7 @@ pub struct HttpConcurrencyLimitLayer {
 }
 
 impl HttpConcurrencyLimitLayer {
-    pub fn new(max_ongoing_http_requests: usize) -> std::result::Result<Self, ConfigError> {
+    pub fn new(max_ongoing_http_requests: usize) -> Result<Self> {
         let limit = validate_limit("max_ongoing_http_requests", max_ongoing_http_requests)?.get();
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(limit)),
@@ -44,7 +44,7 @@ struct LimitedTransport {
 }
 
 impl HttpTransport for LimitedTransport {
-    async fn fetch(&self, request: Request<Buffer>) -> Result<Response<HttpBody>> {
+    async fn fetch(&self, request: Request<Buffer>) -> opendal::Result<Response<HttpBody>> {
         let permit = self
             .semaphore
             .clone()
@@ -72,9 +72,9 @@ struct PermitStream<S> {
 
 impl<S> Stream for PermitStream<S>
 where
-    S: Stream<Item = Result<Buffer>> + Unpin,
+    S: Stream<Item = opendal::Result<Buffer>> + Unpin,
 {
-    type Item = Result<Buffer>;
+    type Item = opendal::Result<Buffer>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();

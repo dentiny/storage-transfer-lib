@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use tokio::sync::Semaphore;
 
-use crate::ConfigError;
+use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
@@ -11,10 +11,7 @@ pub struct TransferLimits {
 }
 
 impl TransferLimits {
-    pub fn new(
-        max_queued_objects: usize,
-        max_ongoing_http_requests: usize,
-    ) -> Result<Self, ConfigError> {
+    pub fn new(max_queued_objects: usize, max_ongoing_http_requests: usize) -> Result<Self> {
         Ok(Self {
             max_queued_objects: validate_limit("max_queued_objects", max_queued_objects)?,
             max_ongoing_http_requests: validate_limit(
@@ -33,11 +30,8 @@ impl TransferLimits {
     }
 }
 
-pub(crate) fn validate_limit(
-    field: &'static str,
-    value: usize,
-) -> Result<NonZeroUsize, ConfigError> {
+pub(crate) fn validate_limit(field: &'static str, value: usize) -> Result<NonZeroUsize> {
     NonZeroUsize::new(value)
         .filter(|n| n.get() <= Semaphore::MAX_PERMITS)
-        .ok_or(ConfigError { field, value })
+        .ok_or(Error::InvalidLimit { field, value })
 }

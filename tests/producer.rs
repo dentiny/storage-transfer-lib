@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures_util::{poll, stream};
 use http::{Request, Response};
 use opendal::{
-    Buffer, Error, ErrorKind, HttpBody, HttpTransport, HttpTransporter, OperationContext, Operator,
+    Buffer, ErrorKind, HttpBody, HttpTransport, HttpTransporter, OperationContext, Operator,
     Result, services::S3,
 };
 use storage_transfer_lib::{
-    BucketProducer, HttpConcurrencyLimitLayer, ObjectTask, ProducerError, TransferLimits,
+    BucketProducer, Error, HttpConcurrencyLimitLayer, ObjectTask, TransferLimits,
 };
 use tokio::sync::mpsc;
 
@@ -86,7 +86,7 @@ impl HttpTransport for TestBucket {
         assert_eq!(start, page * page_size);
 
         if self.fail_on_page == Some(page) {
-            return Err(Error::new(
+            return Err(opendal::Error::new(
                 ErrorKind::Unexpected,
                 "injected listing failure",
             ));
@@ -165,7 +165,7 @@ async fn reports_failure_after_a_successful_page() {
     assert_eq!(queue.try_recv().unwrap().path, "empty");
     assert!(matches!(
         poll!(&mut run),
-        std::task::Poll::Ready(Err(ProducerError::Listing(_)))
+        std::task::Poll::Ready(Err(Error::Storage(_)))
     ));
     assert_eq!(queue.try_recv().unwrap().path, "nested/");
     assert!(queue.is_closed());
@@ -184,7 +184,7 @@ async fn closing_queue_cancels_listing_and_waiting_for_capacity() {
         drop(queue);
         assert!(matches!(
             poll!(&mut run),
-            std::task::Poll::Ready(Err(ProducerError::ConsumerClosed))
+            std::task::Poll::Ready(Err(Error::ConsumerClosed))
         ));
         assert_eq!(bucket.request_count(), 1);
     }
