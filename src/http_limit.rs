@@ -45,8 +45,6 @@ struct LimitedTransport {
 
 impl HttpTransport for LimitedTransport {
     async fn fetch(&self, request: Request<Buffer>) -> Result<Response<HttpBody>> {
-        // This private semaphore is never closed. Dropping a waiting or active
-        // future is cancellation-safe; no request is spawned in the background.
         let permit = self
             .semaphore
             .clone()
