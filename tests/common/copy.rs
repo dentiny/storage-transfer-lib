@@ -32,6 +32,7 @@ struct State {
     parts: usize,
     completed: bool,
     aborted: bool,
+    // Existing destination data used to verify that a copy never overwrites it; None means absent.
     existing: Option<&'static [u8]>,
 }
 
