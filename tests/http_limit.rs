@@ -38,6 +38,8 @@ impl TestClient {
         Request::new(Buffer::new())
     }
 
+    // Send a test request and return its unread body so tests control when the permit is released.
+    // Fail after five seconds if the request is blocked, rather than hanging the test.
     async fn fetch(&self) -> HttpBody {
         timeout(
             Duration::from_secs(5),
