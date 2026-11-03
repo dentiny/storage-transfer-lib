@@ -3,14 +3,24 @@ use std::sync::{Arc, Mutex};
 use futures_util::{StreamExt, stream};
 use http::{Method, Request, Response, StatusCode};
 use opendal::{
-    Buffer, BytesRange, HttpBody, HttpTransport, HttpTransporter, OperationContext, Operator,
-    raw::BytesContentRange, services::S3,
+    Buffer, BytesRange, HttpBody, HttpTransport, HttpTransporter, MetadataBuilder,
+    OperationContext, Operator, raw::BytesContentRange, services::S3,
 };
-use storage_transfer_lib::{TransferEngine, TransferLimits, TransferProgress};
+use storage_transfer_lib::{
+    CancellationToken, HttpConcurrencyLimitLayer, ObjectTask, Result, TransferEngine,
+    TransferLimits, copy_object,
+};
 use tokio::sync::Notify;
 
-const BUFFER_SIZE: usize = 8 * 1024 * 1024;
+pub const BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const ETAG: &str = "\"test-etag\"";
+const METADATA: [(&str, &str); 5] = [
+    ("content-type", "application/octet-stream"),
+    ("content-encoding", "identity"),
+    ("content-disposition", "attachment"),
+    ("cache-control", "max-age=60"),
+    ("x-amz-meta-owner", "test"),
+];
 
 #[derive(Clone, Copy)]
 pub enum Fault {
@@ -19,46 +29,58 @@ pub enum Fault {
     Copy,
     Panic,
     BlockRead,
+    ExistingDestination,
 }
 
 #[derive(Default)]
 struct ObjectState {
+    // Payload bytes checked across single PUTs and multipart uploads.
     written: usize,
+    // Number of source range GET requests served.
+    reads: usize,
     parts: usize,
     completed: bool,
+    aborted: bool,
+    // Existing bytes used to verify create-only writes; None means the destination is absent.
+    existing: Option<&'static [u8]>,
 }
 
 struct State {
     objects: Vec<ObjectState>,
-    pages: usize,
     ongoing: usize,
     peak: usize,
 }
 
 #[derive(Clone)]
-pub struct TestTransfer {
+pub struct TestBucket {
     state: Arc<Mutex<State>>,
-    objects: usize,
+    sizes: Arc<[usize]>,
     fault: Fault,
     pub read_started: Arc<Notify>,
 }
 
-impl TestTransfer {
-    pub fn new(objects: usize, fault: Fault) -> Self {
+impl TestBucket {
+    pub fn new(sizes: &[usize], fault: Fault) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
-                objects: (0..objects).map(|_| ObjectState::default()).collect(),
-                pages: 0,
+                objects: sizes
+                    .iter()
+                    .map(|_| ObjectState {
+                        existing: matches!(fault, Fault::ExistingDestination)
+                            .then_some(b"original destination data"),
+                        ..ObjectState::default()
+                    })
+                    .collect(),
                 ongoing: 0,
                 peak: 0,
             })),
-            objects,
+            sizes: sizes.into(),
             fault,
             read_started: Arc::new(Notify::new()),
         }
     }
 
-    pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
+    fn operators(&self) -> (Operator, Operator) {
         let operator = |bucket| {
             Operator::new(
                 S3::default()
@@ -75,25 +97,65 @@ impl TestTransfer {
                 OperationContext::new().with_http_transport(HttpTransporter::new(self.clone())),
             )
         };
-        TransferEngine::new(operator("source"), operator("destination"), limits).unwrap()
+        (operator("source"), operator("destination"))
     }
 
-    pub fn assert_completed(&self, summary: TransferProgress, limits: TransferLimits) {
+    pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
+        let (source, destination) = self.operators();
+        TransferEngine::new(source, destination, limits).unwrap()
+    }
+
+    // Copy one fixture object with a single HTTP permit shared by both operators.
+    pub async fn copy(&self, index: usize) -> Result<()> {
+        let (source, destination) = self.operators();
+        let layer = HttpConcurrencyLimitLayer::new(1).unwrap();
+        let mut metadata = MetadataBuilder::file(self.sizes[index] as u64);
+        metadata.etag(ETAG);
+        let task = ObjectTask {
+            path: format!("objects/{index}"),
+            metadata: metadata.build(),
+        };
+        copy_object(
+            &source.layer(layer.clone()),
+            &destination.layer(layer),
+            &task,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub fn assert_completed(&self, http_limit: usize) {
         let state = self.state.lock().unwrap();
-        assert!(state.objects.iter().all(|object| object.completed));
-        assert_eq!(summary.listed_objects, self.objects as u64);
-        assert_eq!(summary.copied_objects, summary.listed_objects);
-        assert_eq!(
-            summary.copied_bytes,
-            (0..self.objects).map(Self::size).sum::<usize>() as u64
-        );
-        assert_eq!(
-            state.pages,
-            self.objects.div_ceil(limits.list_page_size()).max(1)
-        );
-        assert!(state.peak <= limits.max_ongoing_http_requests());
-        if self.objects > 1 && limits.max_ongoing_http_requests() > 1 {
+        for (object, &size) in state.objects.iter().zip(self.sizes.iter()) {
+            assert!(object.completed);
+            assert_eq!(object.written, size);
+            assert_eq!(object.reads, size.div_ceil(BUFFER_SIZE));
+            assert_eq!(
+                object.parts,
+                if size > BUFFER_SIZE {
+                    size.div_ceil(BUFFER_SIZE)
+                } else {
+                    0
+                }
+            );
+            assert!(!object.aborted);
+        }
+        assert_eq!(state.ongoing, 0);
+        assert!(state.peak <= http_limit);
+        if self.sizes.len() > 1 && http_limit > 1 {
             assert!(state.peak > 1);
+        }
+    }
+
+    pub fn assert_destination_unchanged(&self) {
+        let state = self.state.lock().unwrap();
+        for (object, &size) in state.objects.iter().zip(self.sizes.iter()) {
+            assert_eq!(
+                object.existing,
+                Some(b"original destination data".as_slice())
+            );
+            assert!(!object.completed);
+            assert_eq!(object.aborted, size > BUFFER_SIZE);
         }
         assert_eq!(state.ongoing, 0);
     }
@@ -102,10 +164,6 @@ impl TestTransfer {
         let state = self.state.lock().unwrap();
         assert_eq!(state.ongoing, 0);
         assert!(state.objects.iter().any(|object| !object.completed));
-    }
-
-    fn size(index: usize) -> usize {
-        [0, 17, 2048, BUFFER_SIZE + 13][index % 4]
     }
 
     fn list(&self, query: &[(&str, &str)]) -> Response<Buffer> {
@@ -121,19 +179,18 @@ impl TestTransfer {
         let start: usize = param("continuation-token").unwrap_or("0").parse().unwrap();
         let limit: usize = param("max-keys").unwrap().parse().unwrap();
         assert!(limit > 0);
-        self.state.lock().unwrap().pages += 1;
         if matches!(self.fault, Fault::Listing) && start > 0 {
             return Self::response(
                 StatusCode::FORBIDDEN,
                 "<Error><Code>AccessDenied</Code></Error>",
             );
         }
-        let end = (start + limit).min(self.objects);
+        let end = (start + limit).min(self.sizes.len());
         let mut xml = format!(
             "<ListBucketResult><IsTruncated>{}</IsTruncated>",
-            end < self.objects
+            end < self.sizes.len()
         );
-        if end < self.objects {
+        if end < self.sizes.len() {
             xml.push_str(&format!(
                 "<NextContinuationToken>{end}</NextContinuationToken>"
             ));
@@ -141,7 +198,7 @@ impl TestTransfer {
         for index in start..end {
             xml.push_str(&format!(
                 "<Contents><Key>objects/{index}</Key><Size>{}</Size><ETag>{ETAG}</ETag><LastModified>2026-01-01T00:00:00Z</LastModified></Contents>",
-                Self::size(index),
+                self.sizes[index],
             ));
         }
         xml.push_str("</ListBucketResult>");
@@ -160,7 +217,10 @@ impl TestTransfer {
         let mut response = Self::response(StatusCode::OK, "");
         response
             .headers_mut()
-            .insert("content-length", Self::size(index).into());
+            .insert("content-length", self.sizes[index].into());
+        for (name, value) in METADATA {
+            response.headers_mut().insert(name, value.parse().unwrap());
+        }
         response
     }
 
@@ -175,8 +235,12 @@ impl TestTransfer {
             .unwrap()
             .parse()
             .unwrap();
-        let range = range.to_content_range(Self::size(index)).unwrap();
-        assert!(range.len() <= BUFFER_SIZE);
+        assert!(!range.is_suffix());
+        let size = range.size().expect("expected a bounded range");
+        assert!(size > 0 && size <= BUFFER_SIZE as u64);
+        assert!(range.offset() + size <= self.sizes[index] as u64);
+        let range = range.to_content_range(self.sizes[index]).unwrap();
+        self.state.lock().unwrap().objects[index].reads += 1;
         let bytes: Vec<u8> = range
             .clone()
             .map(|offset| ((index + offset) % 251) as u8)
@@ -184,7 +248,7 @@ impl TestTransfer {
         let mut response = Self::response(StatusCode::PARTIAL_CONTENT, bytes);
         let content_range = BytesContentRange::default()
             .with_range(range.start as u64, (range.end - 1) as u64)
-            .with_size(Self::size(index) as u64);
+            .with_size(self.sizes[index] as u64);
         response
             .headers_mut()
             .insert("content-range", content_range.to_header().parse().unwrap());
@@ -204,7 +268,10 @@ impl TestTransfer {
             assert_eq!(part, object.parts + 1);
             object.parts += 1;
         } else {
-            assert_eq!(request.headers()["if-none-match"], "*");
+            Self::check_metadata(request);
+            if let Some(response) = Self::collision(request, object) {
+                return response;
+            }
             object.completed = true;
         }
         assert!(request.body().len() <= BUFFER_SIZE);
@@ -213,23 +280,41 @@ impl TestTransfer {
         }
         object.written += request.body().len();
         if part.is_none() {
-            assert_eq!(object.written, Self::size(index));
+            assert_eq!(object.written, self.sizes[index]);
         }
         Self::response(StatusCode::OK, "")
     }
 
     fn complete(&self, index: usize, request: &Request<Buffer>) -> Response<Buffer> {
-        assert_eq!(request.headers()["if-none-match"], "*");
         let mut state = self.state.lock().unwrap();
         let object = &mut state.objects[index];
-        assert_eq!(object.written, Self::size(index));
-        assert_eq!(object.parts, Self::size(index).div_ceil(BUFFER_SIZE));
+        if let Some(response) = Self::collision(request, object) {
+            return response;
+        }
+        assert_eq!(object.written, self.sizes[index]);
+        assert_eq!(object.parts, self.sizes[index].div_ceil(BUFFER_SIZE));
         assert!(!object.completed);
         object.completed = true;
         Self::response(
             StatusCode::OK,
             "<CompleteMultipartUploadResult><ETag>test-etag</ETag></CompleteMultipartUploadResult>",
         )
+    }
+
+    fn check_metadata(request: &Request<Buffer>) {
+        for (name, value) in METADATA {
+            assert_eq!(request.headers()[name], value);
+        }
+    }
+
+    fn collision(request: &Request<Buffer>, object: &ObjectState) -> Option<Response<Buffer>> {
+        assert_eq!(request.headers()["if-none-match"], "*");
+        object.existing.map(|_| {
+            Self::response(
+                StatusCode::PRECONDITION_FAILED,
+                "<Error><Code>PreconditionFailed</Code><Message>already exists</Message></Error>",
+            )
+        })
     }
 
     fn response(status: StatusCode, body: impl Into<Buffer>) -> Response<Buffer> {
@@ -263,7 +348,7 @@ impl Drop for ActiveRequest {
     }
 }
 
-impl HttpTransport for TestTransfer {
+impl HttpTransport for TestBucket {
     async fn fetch(&self, request: Request<Buffer>) -> opendal::Result<Response<HttpBody>> {
         let active = ActiveRequest::new(self.state.clone());
         tokio::task::yield_now().await;
@@ -287,6 +372,7 @@ impl HttpTransport for TestTransfer {
                 self.write(index.parse().unwrap(), &request, None)
             }
             (&Method::POST, ["", "destination", "objects", _], [("uploads", "")]) => {
+                Self::check_metadata(&request);
                 Self::response(
                     StatusCode::OK,
                     "<InitiateMultipartUploadResult><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>",
@@ -306,7 +392,12 @@ impl HttpTransport for TestTransfer {
                 ["", "destination", "objects", index],
                 [("uploadId", "test-upload")],
             ) => self.complete(index.parse().unwrap(), &request),
-            (&Method::DELETE, ["", "destination", "objects", _], [("uploadId", "test-upload")]) => {
+            (
+                &Method::DELETE,
+                ["", "destination", "objects", index],
+                [("uploadId", "test-upload")],
+            ) => {
+                self.state.lock().unwrap().objects[index.parse::<usize>().unwrap()].aborted = true;
                 Self::response(StatusCode::NO_CONTENT, "")
             }
             _ => panic!(
