@@ -2,7 +2,9 @@ use std::num::NonZeroUsize;
 
 use tokio::sync::Semaphore;
 
-use crate::ConfigError;
+use crate::{Error, Result};
+
+const MAX_LIST_PAGE_SIZE: usize = 1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
@@ -11,10 +13,7 @@ pub struct TransferLimits {
 }
 
 impl TransferLimits {
-    pub fn new(
-        max_queued_objects: usize,
-        max_ongoing_http_requests: usize,
-    ) -> Result<Self, ConfigError> {
+    pub fn new(max_queued_objects: usize, max_ongoing_http_requests: usize) -> Result<Self> {
         Ok(Self {
             max_queued_objects: validate_limit("max_queued_objects", max_queued_objects)?,
             max_ongoing_http_requests: validate_limit(
@@ -28,16 +27,17 @@ impl TransferLimits {
         self.max_queued_objects.get()
     }
 
+    pub fn list_page_size(self) -> usize {
+        self.max_queued_objects().min(MAX_LIST_PAGE_SIZE)
+    }
+
     pub fn max_ongoing_http_requests(self) -> usize {
         self.max_ongoing_http_requests.get()
     }
 }
 
-pub(crate) fn validate_limit(
-    field: &'static str,
-    value: usize,
-) -> Result<NonZeroUsize, ConfigError> {
+pub(crate) fn validate_limit(field: &'static str, value: usize) -> Result<NonZeroUsize> {
     NonZeroUsize::new(value)
         .filter(|n| n.get() <= Semaphore::MAX_PERMITS)
-        .ok_or(ConfigError { field, value })
+        .ok_or(Error::InvalidLimit { field, value })
 }
