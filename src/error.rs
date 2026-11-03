@@ -21,3 +21,39 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[derive(Debug)]
+pub enum ProducerError {
+    InvalidRoot,
+    UnsupportedEntry(String),
+    Listing(opendal::Error),
+    ConsumerClosed,
+}
+
+impl fmt::Display for ProducerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRoot => write!(f, "source operator must be rooted at the bucket root (/)"),
+            Self::UnsupportedEntry(path) => write!(f, "unknown entry type: {path}"),
+            Self::Listing(error) => write!(f, "bucket listing failed: {error}"),
+            Self::ConsumerClosed => {
+                write!(f, "object queue receiver closed before listing completed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProducerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Listing(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<opendal::Error> for ProducerError {
+    fn from(error: opendal::Error) -> Self {
+        Self::Listing(error)
+    }
+}
