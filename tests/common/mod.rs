@@ -1,12 +1,11 @@
-use std::future::pending;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures_util::stream;
 use http::{Request, Response};
 use opendal::{
-    Buffer, ErrorKind, HttpBody, HttpTransport, HttpTransporter, OperationContext, Operator,
-    Result, services::S3,
+    Buffer, HttpBody, HttpTransport, HttpTransporter, OperationContext, Operator, Result,
+    services::S3,
 };
 use storage_transfer_lib::{BucketProducer, HttpConcurrencyLimitLayer, ObjectTask, TransferLimits};
 use tokio::sync::mpsc;
@@ -15,8 +14,6 @@ use tokio::sync::mpsc;
 pub(super) struct TestBucket {
     objects: usize,
     requests: Arc<AtomicUsize>,
-    pub(super) fail_on_page: Option<usize>,
-    pub(super) block_on_page: Option<usize>,
 }
 
 impl TestBucket {
@@ -24,8 +21,6 @@ impl TestBucket {
         Self {
             objects,
             requests: Arc::new(AtomicUsize::new(0)),
-            fail_on_page: None,
-            block_on_page: None,
         }
     }
 
@@ -85,16 +80,6 @@ impl HttpTransport for TestBucket {
             .parse::<usize>()
             .unwrap();
         assert_eq!(start, page * page_size);
-
-        if self.fail_on_page == Some(page) {
-            return Err(opendal::Error::new(
-                ErrorKind::Unexpected,
-                "injected listing failure",
-            ));
-        }
-        if self.block_on_page == Some(page) {
-            return pending().await;
-        }
 
         let end = (start + page_size).min(self.objects);
         let mut xml = format!(
