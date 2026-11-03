@@ -1,10 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use futures_util::stream;
-use http::{Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode};
 use opendal::{
-    Buffer, HttpBody, HttpTransport, HttpTransporter, MetadataBuilder, OperationContext, Operator,
-    services::S3,
+    Buffer, BytesRange, HttpBody, HttpTransport, HttpTransporter, MetadataBuilder,
+    OperationContext, Operator, raw::BytesContentRange, services::S3,
 };
 use storage_transfer_lib::{
     CancellationToken, HttpConcurrencyLimitLayer, ObjectTask, Result, copy_object,
@@ -12,6 +12,9 @@ use storage_transfer_lib::{
 
 pub const BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const KEY: &str = "nested/object";
+const SOURCE_PATH: &str = "/source/nested/object";
+const DESTINATION_PATH: &str = "/destination/nested/object";
+const UPLOAD_ID: &str = "test-upload";
 const ETAG: &str = "\"source-etag\"";
 const METADATA: [(&str, &str); 5] = [
     ("content-type", "application/octet-stream"),
@@ -161,89 +164,124 @@ impl TestTransport {
             )
         })
     }
+
+    fn stat(&self, request: &Request<Buffer>) -> Response<HttpBody> {
+        assert_eq!(request.headers().get("if-match").unwrap(), ETAG);
+        let mut response = Self::response(StatusCode::OK, "");
+        response
+            .headers_mut()
+            .insert("content-length", self.size.into());
+        response.headers_mut().insert("etag", ETAG.parse().unwrap());
+        for (name, value) in METADATA {
+            response.headers_mut().insert(name, value.parse().unwrap());
+        }
+        response
+    }
+
+    fn read(&self, request: &Request<Buffer>, state: &mut State) -> Response<HttpBody> {
+        assert_eq!(request.headers().get("if-match").unwrap(), ETAG);
+        let range: BytesRange = request.headers()["range"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!range.is_suffix());
+        let size = range.size().expect("expected a bounded range");
+        assert!(size > 0 && size <= BUFFER_SIZE as u64);
+        assert!(range.offset() + size <= self.size as u64);
+        let range = range.to_content_range(self.size).unwrap();
+        state.reads += 1;
+        let bytes: Vec<u8> = range.clone().map(|index| (index % 251) as u8).collect();
+        let content_range = BytesContentRange::default()
+            .with_range(range.start as u64, (range.end - 1) as u64)
+            .with_size(self.size as u64);
+        let mut response = Self::response(StatusCode::PARTIAL_CONTENT, bytes);
+        response
+            .headers_mut()
+            .insert("content-range", content_range.to_header().parse().unwrap());
+        response.headers_mut().insert("etag", ETAG.parse().unwrap());
+        response
+    }
+
+    fn write(request: &Request<Buffer>, state: &mut State) -> Response<HttpBody> {
+        Self::check_metadata(request);
+        if let Some(response) = Self::collision(request, state) {
+            return response;
+        }
+        Self::check_bytes(state, request.body());
+        state.completed = true;
+        Self::response(StatusCode::OK, "")
+    }
+
+    fn create_multipart(request: &Request<Buffer>) -> Response<HttpBody> {
+        Self::check_metadata(request);
+        Self::response(
+            StatusCode::OK,
+            "<InitiateMultipartUploadResult><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>",
+        )
+    }
+
+    fn write_part(request: &Request<Buffer>, part: usize, state: &mut State) -> Response<HttpBody> {
+        assert_eq!(part, state.parts + 1);
+        Self::check_bytes(state, request.body());
+        state.parts += 1;
+        Self::response(StatusCode::OK, "")
+    }
+
+    fn complete_multipart(
+        &self,
+        request: &Request<Buffer>,
+        state: &mut State,
+    ) -> Response<HttpBody> {
+        if let Some(response) = Self::collision(request, state) {
+            return response;
+        }
+        assert_eq!(state.written, self.size);
+        state.completed = true;
+        Self::response(
+            StatusCode::OK,
+            "<CompleteMultipartUploadResult><ETag>destination-etag</ETag></CompleteMultipartUploadResult>",
+        )
+    }
+
+    fn abort_multipart(state: &mut State) -> Response<HttpBody> {
+        state.aborted = true;
+        Self::response(StatusCode::NO_CONTENT, "")
+    }
 }
 
 impl HttpTransport for TestTransport {
     async fn fetch(&self, request: Request<Buffer>) -> opendal::Result<Response<HttpBody>> {
-        let method = request.method().as_str();
-        let query = request.uri().query().unwrap_or_default();
+        let mut query: Vec<_> =
+            form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()).collect();
+        query.sort_unstable();
+        let params: Vec<_> = query
+            .iter()
+            .map(|(key, value)| (key.as_ref(), value.as_ref()))
+            .collect();
         let mut state = self.state.lock().unwrap();
-        if request.uri().path() == format!("/source/{KEY}") {
-            assert_eq!(request.headers().get("if-match").unwrap(), ETAG);
-            if method == "HEAD" {
-                let mut response = Self::response(StatusCode::OK, "");
-                response
-                    .headers_mut()
-                    .insert("content-length", self.size.into());
-                response.headers_mut().insert("etag", ETAG.parse().unwrap());
-                for (name, value) in METADATA {
-                    response.headers_mut().insert(name, value.parse().unwrap());
-                }
-                return Ok(response);
+        let response = match (request.method(), request.uri().path(), params.as_slice()) {
+            (&Method::HEAD, SOURCE_PATH, []) => self.stat(&request),
+            (&Method::GET, SOURCE_PATH, []) => self.read(&request, &mut state),
+            (&Method::PUT, DESTINATION_PATH, []) => Self::write(&request, &mut state),
+            (&Method::POST, DESTINATION_PATH, [("uploads", "")]) => {
+                Self::create_multipart(&request)
             }
-            assert_eq!(method, "GET");
-            let range = request.headers().get("range").unwrap().to_str().unwrap();
-            let (start, end) = range
-                .strip_prefix("bytes=")
-                .unwrap()
-                .split_once('-')
-                .unwrap();
-            let start: usize = start.parse().unwrap();
-            let end: usize = end.parse().unwrap();
-            assert!(end < self.size && end - start < BUFFER_SIZE);
-            state.reads += 1;
-            let bytes: Vec<u8> = (start..=end).map(|index| (index % 251) as u8).collect();
-            let mut response = Self::response(StatusCode::PARTIAL_CONTENT, bytes);
-            response.headers_mut().insert(
-                "content-range",
-                format!("bytes {start}-{end}/{}", self.size)
-                    .parse()
-                    .unwrap(),
-            );
-            response.headers_mut().insert("etag", ETAG.parse().unwrap());
-            return Ok(response);
-        }
-        assert_eq!(request.uri().path(), format!("/destination/{KEY}"));
-        if method == "POST" && query == "uploads" {
-            Self::check_metadata(&request);
-            return Ok(Self::response(
-                StatusCode::OK,
-                "<InitiateMultipartUploadResult><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>",
-            ));
-        }
-        if method == "PUT" {
-            if query.is_empty() {
-                Self::check_metadata(&request);
-                if let Some(response) = Self::collision(&request, &state) {
-                    return Ok(response);
-                }
-                state.completed = true;
-            } else {
-                assert!(query.contains("uploadId=test-upload"));
-                assert!(
-                    query
-                        .split('&')
-                        .any(|param| param == format!("partNumber={}", state.parts + 1))
-                );
-                state.parts += 1;
+            (&Method::PUT, DESTINATION_PATH, [("partNumber", part), ("uploadId", UPLOAD_ID)]) => {
+                Self::write_part(&request, part.parse().unwrap(), &mut state)
             }
-            Self::check_bytes(&mut state, request.body());
-            return Ok(Self::response(StatusCode::OK, ""));
-        }
-        assert!(query.contains("uploadId=test-upload"));
-        if method == "POST" {
-            if let Some(response) = Self::collision(&request, &state) {
-                return Ok(response);
+            (&Method::POST, DESTINATION_PATH, [("uploadId", UPLOAD_ID)]) => {
+                self.complete_multipart(&request, &mut state)
             }
-            assert_eq!(state.written, self.size);
-            state.completed = true;
-            return Ok(Self::response(
-                StatusCode::OK,
-                "<CompleteMultipartUploadResult><ETag>destination-etag</ETag></CompleteMultipartUploadResult>",
-            ));
-        }
-        assert_eq!(method, "DELETE");
-        state.aborted = true;
-        Ok(Self::response(StatusCode::NO_CONTENT, ""))
+            (&Method::DELETE, DESTINATION_PATH, [("uploadId", UPLOAD_ID)]) => {
+                Self::abort_multipart(&mut state)
+            }
+            _ => panic!(
+                "unexpected S3 request: {} {}",
+                request.method(),
+                request.uri()
+            ),
+        };
+        Ok(response)
     }
 }
