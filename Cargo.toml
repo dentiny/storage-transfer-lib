@@ -1,0 +1,25 @@
+[package]
+name = "storage-transfer-lib"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "Bounded bucket-to-bucket transfers using Apache OpenDAL"
+repository = "https://github.com/dentiny/storage-transfer-lib"
+
+[dependencies]
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+http = "=1.5.0"
+opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls", "services-s3"] }
+tokio = { version = "=1.53.3", features = ["sync"] }
+
+[dev-dependencies]
+futures-util = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+opendal = { version = "=0.59.5", default-features = false, features = ["layers-retry"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
