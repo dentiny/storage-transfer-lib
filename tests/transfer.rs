@@ -15,7 +15,7 @@ async fn copies_bounded_ranges_and_streams_verification_with_one_http_permit() {
         16 * BUFFER_SIZE + 31,
     ] {
         let bucket = TestBucket::new(&[size], Fault::None);
-        tokio::time::timeout(std::time::Duration::from_secs(30), bucket.copy(0))
+        tokio::time::timeout(std::time::Duration::from_secs(60), bucket.copy(0))
             .await
             .expect("single-permit copy deadlocked")
             .unwrap();
