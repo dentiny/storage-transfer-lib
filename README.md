@@ -139,10 +139,9 @@ to `input/raw/`, so `input/raw-other/` is outside the transfer. Empty prefixes
 select bucket roots. Directory roots use OpenDAL's normal root normalization;
 this library adds no filesystem-style prefix validation.
 
-The engine and `copy_object` reject equal or overlapping roots for operators
-with the same S3 bucket name, conservatively including different endpoints.
-Disjoint sibling directories in the same bucket are allowed. Create-only writes,
-conditional source reads, cancellation and destination verification also apply
-to scoped transfers. Report `path` stays relative to the configured source root;
+The caller chooses the source and destination buckets. The library does not infer
+bucket identity from operator names or compare directory overlap. Create-only
+writes, conditional source reads, cancellation and destination verification also
+apply to scoped transfers. Report `path` stays relative to the configured source root;
 new `source_path` and `destination_path` fields contain complete bucket-relative
 keys for auditing.

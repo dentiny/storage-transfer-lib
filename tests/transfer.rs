@@ -230,54 +230,6 @@ async fn copies_relative_paths_between_directory_roots_and_reports_full_keys() {
     }
 }
 
-#[test]
-fn rejects_overlapping_roots_but_allows_sibling_directories_in_same_bucket() {
-    fn operator(root: &str) -> opendal::Operator {
-        opendal::Operator::new(
-            opendal::services::S3::default()
-                .bucket("same-bucket")
-                .root(root)
-                .region("us-ashburn-1")
-                .endpoint("https://storage.invalid")
-                .access_key_id("test")
-                .secret_access_key("test")
-                .disable_config_load()
-                .disable_ec2_metadata(),
-        )
-        .unwrap()
-    }
-    for (source, destination) in [
-        ("/", "/"),
-        ("/", "/out/"),
-        ("/out/", "/"),
-        ("/raw/", "/raw/nested/"),
-        ("/raw/nested/", "/raw/"),
-        ("/raw/", "/raw/"),
-    ] {
-        assert!(
-            storage_transfer_lib::TransferEngine::new(
-                operator(source),
-                operator(destination),
-                Default::default()
-            )
-            .is_err()
-        );
-    }
-    for (source, destination) in [
-        ("/raw/", "/raw-other/"),
-        ("/input/raw/", "/output/brightdata/"),
-    ] {
-        assert!(
-            storage_transfer_lib::TransferEngine::new(
-                operator(source),
-                operator(destination),
-                Default::default()
-            )
-            .is_ok()
-        );
-    }
-}
-
 #[tokio::test]
 async fn prefixed_collisions_leave_destination_unchanged() {
     let bucket = TestBucket::new(&[BUFFER_SIZE + 13], Fault::ExistingDestination)

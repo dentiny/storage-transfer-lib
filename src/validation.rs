@@ -54,19 +54,6 @@ fn validate_object(task: &ObjectTask) -> Result<()> {
 }
 
 fn validate_buckets(source: &Operator, destination: &Operator) -> Result<()> {
-    let source_info = source.info();
-    let destination_info = destination.info();
-    // S3 operator names identify the bucket. Conservatively reject overlap
-    // even across endpoints with the same bucket name: listing and writing
-    // intersecting key spaces can otherwise recursively copy our own output.
-    if source_info.name() == destination_info.name()
-        && (source_info.root().starts_with(&destination_info.root())
-            || destination_info.root().starts_with(&source_info.root()))
-    {
-        return Err(Error::Unsupported(
-            "source and destination directories overlap in the same bucket".into(),
-        ));
-    }
     if source.info().scheme() != "s3" || destination.info().scheme() != "s3" {
         return Err(Error::Unsupported(
             "only S3-compatible buckets are supported".into(),
