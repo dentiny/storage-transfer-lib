@@ -98,9 +98,12 @@ impl TestBucket {
     }
 
     pub fn with_prefixes(mut self, source: &str, destination: &str) -> Self {
-        self.source_prefix = storage_transfer_lib::normalize_directory_prefix(source).unwrap();
-        self.destination_prefix =
-            storage_transfer_lib::normalize_directory_prefix(destination).unwrap();
+        self.source_prefix = opendal::raw::normalize_root(source)
+            .trim_start_matches('/')
+            .to_owned();
+        self.destination_prefix = opendal::raw::normalize_root(destination)
+            .trim_start_matches('/')
+            .to_owned();
         self
     }
 

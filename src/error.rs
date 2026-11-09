@@ -31,7 +31,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::InvalidConfig(field) => write!(f, "invalid transfer configuration: {field}"),
-            Self::InvalidRoot => write!(f, "operators must use canonical directory roots"),
+            Self::InvalidRoot => write!(f, "operators must be rooted at the bucket root (/)"),
             Self::UnsupportedEntry(path) => write!(f, "unknown entry type: {path}"),
             Self::Storage(error) => write!(f, "storage operation failed: {error}"),
             Self::Unsupported(reason) => write!(f, "unsupported copy: {reason}"),

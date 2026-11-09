@@ -56,8 +56,6 @@ fn validate_object(task: &ObjectTask) -> Result<()> {
 fn validate_buckets(source: &Operator, destination: &Operator) -> Result<()> {
     let source_info = source.info();
     let destination_info = destination.info();
-    crate::prefix::validate_root(&source_info.root())?;
-    crate::prefix::validate_root(&destination_info.root())?;
     // S3 operator names identify the bucket. Conservatively reject overlap
     // even across endpoints with the same bucket name: listing and writing
     // intersecting key spaces can otherwise recursively copy our own output.

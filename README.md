@@ -122,17 +122,13 @@ Object statuses are `copied`, `failed`, or `cancelled`. A failed run can leave l
 
 ## Directory-scoped transfers
 
-Set the source and destination S3 operator roots independently. Use
-`normalize_directory_prefix` before passing user-supplied prefixes to OpenDAL,
-which otherwise normalizes some path spellings silently:
+Set the source and destination S3 operator roots independently:
 
 ```rust
-use storage_transfer_lib::normalize_directory_prefix;
 use opendal::services::S3;
 
-let source = S3::default().root(&normalize_directory_prefix("input/raw/")?);
-let destination = S3::default().root(&normalize_directory_prefix("brightdata/")?);
-# Ok::<(), storage_transfer_lib::Error>(())
+let source = S3::default().root("input/raw/");
+let destination = S3::default().root("brightdata/");
 ```
 
 Configure each builder's bucket, endpoint, region and credentials as in the OCI
@@ -140,9 +136,8 @@ example, then pass the operators to `TransferEngine::new` as usual.
 `input/raw/nested/a.csv` maps to `brightdata/nested/a.csv`: the source directory
 is stripped and the destination directory is prepended. Listing is constrained
 to `input/raw/`, so `input/raw-other/` is outside the transfer. Empty prefixes
-select bucket roots, and prefixes with or without a trailing slash are accepted.
-Leading slashes, empty path segments, `.`/`..`, surrounding whitespace and control
-characters are rejected by the helper; literal percent escapes are not decoded.
+select bucket roots. Directory roots use OpenDAL's normal root normalization;
+this library adds no filesystem-style prefix validation.
 
 The engine and `copy_object` reject equal or overlapping roots for operators
 with the same S3 bucket name, conservatively including different endpoints.
