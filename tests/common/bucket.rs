@@ -105,15 +105,11 @@ impl TestBucket {
     }
 
     fn operators(&self) -> (Operator, Operator) {
-        let operator = |bucket| {
+        let operator = |bucket, prefix: &str| {
             Operator::new(
                 S3::default()
                     .bucket(bucket)
-                    .root(if bucket == "source" {
-                        &self.source_prefix
-                    } else {
-                        &self.destination_prefix
-                    })
+                    .root(prefix)
                     .region("us-ashburn-1")
                     .endpoint("https://storage.invalid")
                     .access_key_id("test-key")
@@ -126,7 +122,10 @@ impl TestBucket {
                 OperationContext::new().with_http_transport(HttpTransporter::new(self.clone())),
             )
         };
-        (operator("source"), operator("destination"))
+        (
+            operator("source", &self.source_prefix),
+            operator("destination", &self.destination_prefix),
+        )
     }
 
     pub fn engine(&self, limits: TransferLimits) -> TransferEngine {
