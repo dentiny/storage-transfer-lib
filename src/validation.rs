@@ -54,9 +54,6 @@ fn validate_object(task: &ObjectTask) -> Result<()> {
 }
 
 fn validate_buckets(source: &Operator, destination: &Operator) -> Result<()> {
-    if source.info().root() != "/" || destination.info().root() != "/" {
-        return Err(Error::InvalidRoot);
-    }
     if source.info().scheme() != "s3" || destination.info().scheme() != "s3" {
         return Err(Error::Unsupported(
             "only S3-compatible buckets are supported".into(),

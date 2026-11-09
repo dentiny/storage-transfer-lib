@@ -32,7 +32,7 @@ export SOURCE_BUCKET='source-bucket'
 export DESTINATION_BUCKET='destination-bucket'
 ```
 
-The following `src/main.rs` copies all file objects to the same keys in the destination. Both operators cover the bucket root. This example uses the same region and credentials for both buckets; operators can also be built separately for different endpoints or credentials.
+The following `src/main.rs` copies all file objects to the same keys in the destination. Both operators cover the bucket root in this example. This example uses the same region and credentials for both buckets; operators can also be built separately for different endpoints or credentials.
 
 ```rust
 use std::{env, error::Error, path::Path, time::Duration};
@@ -119,3 +119,29 @@ Progress includes `listed_objects`, `copied_objects`, and `copied_bytes`. Copied
 ```
 
 Object statuses are `copied`, `failed`, or `cancelled`. A failed run can leave listed objects unattempted; the report is not a complete bucket inventory or a resume database. Process termination can leave a partial report without a `finished` record.
+
+## Directory-scoped transfers
+
+Set the source and destination S3 operator roots independently:
+
+```rust
+use opendal::services::S3;
+
+let source = S3::default().root("input/raw/");
+let destination = S3::default().root("brightdata/");
+```
+
+Configure each builder's bucket, endpoint, region and credentials as in the OCI
+example, then pass the operators to `TransferEngine::new` as usual.
+`input/raw/nested/a.csv` maps to `brightdata/nested/a.csv`: the source directory
+is stripped and the destination directory is prepended. Listing is constrained
+to `input/raw/`, so `input/raw-other/` is outside the transfer. Empty prefixes
+select bucket roots. Directory roots use OpenDAL's normal root normalization;
+this library adds no filesystem-style prefix validation.
+
+The caller chooses the source and destination buckets. The library does not infer
+bucket identity from operator names or compare directory overlap. Create-only
+writes, conditional source reads, cancellation and destination verification also
+apply to scoped transfers. Report `path` stays relative to the configured source root;
+new `source_path` and `destination_path` fields contain complete bucket-relative
+keys for auditing.

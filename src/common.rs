@@ -7,7 +7,7 @@ pub(crate) type Sha256Digest = [u8; 32];
 // The producer filters out directory entries before creating tasks.
 #[derive(Clone, Debug)]
 pub struct ObjectTask {
-    // Object key relative to the source bucket root.
+    // Object key relative to the source operator's directory root.
     pub path: String,
     // Metadata returned by listing, such as size and ETag.
     pub metadata: Metadata,
