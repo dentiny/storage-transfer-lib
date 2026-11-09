@@ -16,6 +16,8 @@ pub(crate) struct Report(Arc<Mutex<File>>);
 enum Record<'a> {
     Object {
         path: &'a str,
+        source_path: String,
+        destination_path: String,
         bytes: u64,
         status: &'static str,
         error: Option<String>,
@@ -37,9 +39,17 @@ impl Report {
         Ok(Self(Arc::new(Mutex::new(file))))
     }
 
-    pub async fn object(&self, task: &ObjectTask, result: &Result<()>) -> Result<()> {
+    pub async fn object(
+        &self,
+        task: &ObjectTask,
+        result: &Result<()>,
+        source_root: &str,
+        destination_root: &str,
+    ) -> Result<()> {
         self.append(&Record::Object {
             path: &task.path,
+            source_path: format!("{}{}", source_root.trim_start_matches('/'), task.path),
+            destination_path: format!("{}{}", destination_root.trim_start_matches('/'), task.path),
             bytes: task.metadata.content_length(),
             status: result.as_ref().err().map_or("copied", status),
             error: result.as_ref().err().map(ToString::to_string),

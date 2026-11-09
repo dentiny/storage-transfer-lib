@@ -189,3 +189,105 @@ async fn reports_verified_success_and_incomplete_objects() {
         assert_eq!(std::fs::read_to_string(path).unwrap(), report);
     }
 }
+
+#[tokio::test]
+async fn copies_relative_paths_between_directory_roots_and_reports_full_keys() {
+    for (source, destination) in [
+        ("", "brightdata/"),
+        ("raw/", ""),
+        ("input/raw", "datasets/brightdata"),
+    ] {
+        let bucket = TestBucket::new(&[0, 17, BUFFER_SIZE + 13], Fault::None)
+            .with_prefixes(source, destination);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("report.jsonl");
+        let summary = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            engine.run_with_report(&CancellationToken::new(), &report),
+        )
+        .await
+        .expect("directory copy deadlocked")
+        .unwrap();
+        assert_eq!(summary.copied_objects, 3);
+        bucket.assert_completed(1);
+        let source = storage_transfer_lib::normalize_directory_prefix(source).unwrap();
+        let destination = storage_transfer_lib::normalize_directory_prefix(destination).unwrap();
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(report)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for record in &records[..3] {
+            let path = record["path"].as_str().unwrap();
+            assert_eq!(record["source_path"], format!("{source}{path}"));
+            assert_eq!(record["destination_path"], format!("{destination}{path}"));
+        }
+    }
+}
+
+#[test]
+fn rejects_overlapping_roots_but_allows_sibling_directories_in_same_bucket() {
+    fn operator(root: &str) -> opendal::Operator {
+        opendal::Operator::new(
+            opendal::services::S3::default()
+                .bucket("same-bucket")
+                .root(root)
+                .region("us-ashburn-1")
+                .endpoint("https://storage.invalid")
+                .access_key_id("test")
+                .secret_access_key("test")
+                .disable_config_load()
+                .disable_ec2_metadata(),
+        )
+        .unwrap()
+    }
+    for (source, destination) in [
+        ("/", "/"),
+        ("/", "/out/"),
+        ("/out/", "/"),
+        ("/raw/", "/raw/nested/"),
+        ("/raw/nested/", "/raw/"),
+        ("/raw/", "/raw/"),
+    ] {
+        assert!(
+            storage_transfer_lib::TransferEngine::new(
+                operator(source),
+                operator(destination),
+                Default::default()
+            )
+            .is_err()
+        );
+    }
+    for (source, destination) in [
+        ("/raw/", "/raw-other/"),
+        ("/input/raw/", "/output/brightdata/"),
+    ] {
+        assert!(
+            storage_transfer_lib::TransferEngine::new(
+                operator(source),
+                operator(destination),
+                Default::default()
+            )
+            .is_ok()
+        );
+    }
+    for root in ["/raw/../other/", "/raw/./"] {
+        assert!(
+            storage_transfer_lib::TransferEngine::new(
+                operator(root),
+                operator("/out/"),
+                Default::default()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn prefixed_collisions_leave_destination_unchanged() {
+    let bucket = TestBucket::new(&[BUFFER_SIZE + 13], Fault::ExistingDestination)
+        .with_prefixes("raw/", "brightdata/");
+    assert!(bucket.copy(0).await.is_err());
+    bucket.assert_destination_unchanged();
+}

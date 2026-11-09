@@ -41,9 +41,7 @@ impl BucketProducer {
     }
 
     async fn produce(&self) -> Result<()> {
-        if self.source.info().root() != "/" {
-            return Err(Error::InvalidRoot);
-        }
+        crate::prefix::validate_root(&self.source.info().root())?;
         let mut lister = self
             .source
             .lister_with("/")

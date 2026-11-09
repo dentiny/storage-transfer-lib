@@ -67,6 +67,8 @@ pub struct TestBucket {
     sizes: Arc<[usize]>,
     fault: Fault,
     pub read_started: Arc<Notify>,
+    source_prefix: String,
+    destination_prefix: String,
 }
 
 impl TestBucket {
@@ -90,7 +92,16 @@ impl TestBucket {
             sizes: sizes.into(),
             fault,
             read_started: Arc::new(Notify::new()),
+            source_prefix: String::new(),
+            destination_prefix: String::new(),
         }
+    }
+
+    pub fn with_prefixes(mut self, source: &str, destination: &str) -> Self {
+        self.source_prefix = storage_transfer_lib::normalize_directory_prefix(source).unwrap();
+        self.destination_prefix =
+            storage_transfer_lib::normalize_directory_prefix(destination).unwrap();
+        self
     }
 
     fn operators(&self) -> (Operator, Operator) {
@@ -98,6 +109,11 @@ impl TestBucket {
             Operator::new(
                 S3::default()
                     .bucket(bucket)
+                    .root(if bucket == "source" {
+                        &self.source_prefix
+                    } else {
+                        &self.destination_prefix
+                    })
                     .region("us-ashburn-1")
                     .endpoint("https://storage.invalid")
                     .access_key_id("test-key")
@@ -207,7 +223,10 @@ impl TestBucket {
                 .map(|(_, value)| *value)
         };
         assert_eq!(param("list-type"), Some("2"));
-        assert!(param("prefix").is_none());
+        assert_eq!(
+            param("prefix"),
+            (!self.source_prefix.is_empty()).then_some(self.source_prefix.as_str())
+        );
         assert!(param("delimiter").is_none());
         let start: usize = param("continuation-token").unwrap_or("0").parse().unwrap();
         let limit: usize = param("max-keys").unwrap().parse().unwrap();
@@ -230,8 +249,8 @@ impl TestBucket {
         }
         for index in start..end {
             xml.push_str(&format!(
-                "<Contents><Key>objects/{index}</Key><Size>{}</Size><ETag>{ETAG}</ETag><LastModified>2026-01-01T00:00:00Z</LastModified></Contents>",
-                self.sizes[index],
+                "<Contents><Key>{}objects/{index}</Key><Size>{}</Size><ETag>{ETAG}</ETag><LastModified>2026-01-01T00:00:00Z</LastModified></Contents>",
+                self.source_prefix, self.sizes[index],
             ));
         }
         xml.push_str("</ListBucketResult>");
@@ -438,7 +457,25 @@ impl HttpTransport for TestBucket {
             .iter()
             .map(|(key, value)| (key.as_ref(), value.as_ref()))
             .collect();
-        let path: Vec<_> = request.uri().path().split('/').collect();
+        // Assert every data request stays inside its configured directory.
+        let scoped_path = if request.uri().path() == "/source" {
+            "/source".to_owned()
+        } else if let Some(relative) = request
+            .uri()
+            .path()
+            .strip_prefix(&format!("/source/{}", self.source_prefix))
+        {
+            format!("/source/{relative}")
+        } else if let Some(relative) = request
+            .uri()
+            .path()
+            .strip_prefix(&format!("/destination/{}", self.destination_prefix))
+        {
+            format!("/destination/{relative}")
+        } else {
+            panic!("request outside directory scope: {}", request.uri());
+        };
+        let path: Vec<_> = scoped_path.split('/').collect();
         let response = match (request.method(), path.as_slice(), params.as_slice()) {
             (&Method::GET, ["", "source"], params) => self.list(params),
             (&Method::HEAD, ["", "source", "objects", index], []) => {

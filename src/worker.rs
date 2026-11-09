@@ -38,7 +38,16 @@ impl CopyWorker {
                 });
             }
             let reported = match &self.report {
-                Some(report) => report.object(&task, &result).await,
+                Some(report) => {
+                    report
+                        .object(
+                            &task,
+                            &result,
+                            &self.source.info().root(),
+                            &self.destination.info().root(),
+                        )
+                        .await
+                }
                 None => Ok(()),
             };
             result.and(reported)?;
