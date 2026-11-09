@@ -5,7 +5,7 @@ use common::{BUFFER_SIZE, Fault, TestBucket};
 use storage_transfer_lib::{CancellationToken, Error, TransferLimits, TransferProgress};
 
 #[tokio::test]
-async fn copies_objects_in_bounded_ranges_with_one_http_permit() {
+async fn copies_bounded_ranges_and_streams_verification_with_one_http_permit() {
     for size in [
         0,
         17,
@@ -15,7 +15,10 @@ async fn copies_objects_in_bounded_ranges_with_one_http_permit() {
         16 * BUFFER_SIZE + 31,
     ] {
         let bucket = TestBucket::new(&[size], Fault::None);
-        bucket.copy(0).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), bucket.copy(0))
+            .await
+            .expect("single-permit copy deadlocked")
+            .unwrap();
         bucket.assert_completed(1);
     }
 }
@@ -188,4 +191,110 @@ async fn reports_verified_success_and_incomplete_objects() {
         ));
         assert_eq!(std::fs::read_to_string(path).unwrap(), report);
     }
+}
+
+#[tokio::test]
+async fn overlaps_upload_with_one_bounded_source_prefetch() {
+    let bucket = TestBucket::new(&[4 * BUFFER_SIZE + 13], Fault::RequireReadWriteOverlap);
+    let mut engine = bucket.engine(TransferLimits::new(1, 2).unwrap());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        engine.run(&CancellationToken::new()),
+    )
+    .await
+    .expect("upload and bounded prefetch did not overlap")
+    .unwrap();
+    bucket.assert_completed(2);
+}
+
+#[tokio::test]
+async fn cancellation_releases_prefetch_and_streaming_verification_bodies() {
+    for fault in [Fault::BlockPrefetch, Fault::BlockVerificationBody] {
+        let bucket = TestBucket::new(&[3 * BUFFER_SIZE + 13], fault);
+        let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+        let cancellation = CancellationToken::new();
+        let run = engine.run(&cancellation);
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("finished before cancellation: {result:?}"),
+            _ = bucket.read_started.notified() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("body was never reached"),
+        }
+        cancellation.cancel();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), run)
+                .await
+                .unwrap(),
+            Err(Error::Cancelled)
+        ));
+        bucket.assert_failures(0, 0, 0);
+    }
+}
+
+#[tokio::test]
+async fn rejects_truncated_verification_stream_without_advancing_progress() {
+    let bucket = TestBucket::new(&[BUFFER_SIZE + 13], Fault::TruncatedVerificationBody);
+    let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+    let progress = engine.subscribe();
+    assert!(engine.run(&CancellationToken::new()).await.is_err());
+    assert_eq!(progress.borrow().copied_objects, 0);
+    assert_eq!(progress.borrow().copied_bytes, 0);
+    bucket.assert_failures(0, 0, 0);
+}
+
+// Run each variant in a fresh process and use /usr/bin/time to compare peak RSS.
+// Synthetic 64 KiB HTTP frames retain larger backing allocations, like slices
+// of transport receive buffers. This is not an OCI throughput benchmark.
+#[tokio::test]
+#[ignore = "synthetic read-path benchmark; run explicitly in release mode"]
+async fn read_path_benchmark() {
+    let ratio = std::env::var("BACKING_RATIO")
+        .unwrap_or_else(|_| "8".into())
+        .parse()
+        .unwrap();
+    let bucket = TestBucket::new(&[64 * 1024 * 1024; 4], Fault::None)
+        .with_transport_shape(ratio, std::time::Duration::from_millis(2));
+    let mut engine = bucket.engine(TransferLimits::new(4, 4).unwrap());
+    let start = std::time::Instant::now();
+    let summary = engine.run(&CancellationToken::new()).await.unwrap();
+    assert_eq!(summary.copied_objects, 4);
+    println!(
+        "GET counts (source, destination): {:?}",
+        bucket.read_counts()
+    );
+    println!(
+        "backing_ratio={ratio} bytes={} elapsed={:?} MiB/s={:.1}",
+        summary.copied_bytes,
+        start.elapsed(),
+        summary.copied_bytes as f64 / 1048576.0 / start.elapsed().as_secs_f64()
+    );
+}
+
+#[tokio::test]
+async fn upload_failure_cancels_blocked_prefetch_before_aborting() {
+    let bucket = TestBucket::new(
+        &[4 * BUFFER_SIZE + 13],
+        Fault::FailUploadWithBlockedPrefetch,
+    );
+    let mut engine = bucket.engine(TransferLimits::new(1, 2).unwrap());
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        engine.run(&CancellationToken::new()),
+    )
+    .await
+    .expect("failed upload did not cancel its prefetch")
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::Storage(error) if error.kind() == opendal::ErrorKind::PermissionDenied)
+    );
+    bucket.assert_failures(0, 1, 1);
+}
+
+#[tokio::test]
+async fn retries_verification_from_last_consumed_offset() {
+    let bucket = TestBucket::new(&[BUFFER_SIZE + 13], Fault::RetryVerificationBody);
+    let mut engine = bucket.engine(TransferLimits::new(1, 1).unwrap());
+    engine.run(&CancellationToken::new()).await.unwrap();
+    bucket.assert_completed(1);
+    bucket.assert_failures(1, 0, 0);
 }

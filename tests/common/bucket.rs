@@ -37,6 +37,12 @@ pub enum Fault {
     TimeoutRead,
     AbortHang,
     AbortDenied,
+    RequireReadWriteOverlap,
+    BlockVerificationBody,
+    TruncatedVerificationBody,
+    BlockPrefetch,
+    FailUploadWithBlockedPrefetch,
+    RetryVerificationBody,
 }
 
 #[derive(Default)]
@@ -45,6 +51,7 @@ struct ObjectState {
     written: usize,
     // Number of source range GET requests served.
     reads: usize,
+    verification_reads: usize,
     parts: usize,
     completed: bool,
     aborted: bool,
@@ -67,6 +74,8 @@ pub struct TestBucket {
     sizes: Arc<[usize]>,
     fault: Fault,
     pub read_started: Arc<Notify>,
+    frame_backing_ratio: usize,
+    request_delay: std::time::Duration,
 }
 
 impl TestBucket {
@@ -90,7 +99,19 @@ impl TestBucket {
             sizes: sizes.into(),
             fault,
             read_started: Arc::new(Notify::new()),
+            frame_backing_ratio: 1,
+            request_delay: std::time::Duration::ZERO,
         }
+    }
+
+    pub fn with_transport_shape(
+        mut self,
+        backing_ratio: usize,
+        delay: std::time::Duration,
+    ) -> Self {
+        self.frame_backing_ratio = backing_ratio;
+        self.request_delay = delay;
+        self
     }
 
     fn operators(&self) -> (Operator, Operator) {
@@ -148,12 +169,27 @@ impl TestBucket {
         .await
     }
 
+    pub fn read_counts(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (
+            state.objects.iter().map(|o| o.reads).sum(),
+            state.objects.iter().map(|o| o.verification_reads).sum(),
+        )
+    }
+
     pub fn assert_completed(&self, http_limit: usize) {
         let state = self.state.lock().unwrap();
         for (object, &size) in state.objects.iter().zip(self.sizes.iter()) {
             assert!(object.completed);
             assert_eq!(object.written, size);
             assert_eq!(object.reads, size.div_ceil(BUFFER_SIZE));
+            assert_eq!(
+                object.verification_reads,
+                usize::from(size > 0)
+                    + usize::from(
+                        matches!(self.fault, Fault::RetryVerificationBody) && size > 64 * 1024
+                    )
+            );
             assert_eq!(
                 object.parts,
                 if size > BUFFER_SIZE {
@@ -299,20 +335,39 @@ impl TestBucket {
             .unwrap();
         assert!(!range.is_suffix());
         let size = range.size().expect("expected a bounded range");
-        assert!(size > 0 && size <= BUFFER_SIZE as u64);
+        assert!(size > 0);
+        if destination {
+            if self.request_delay.is_zero() && !matches!(self.fault, Fault::RetryVerificationBody) {
+                assert_eq!(range.offset(), 0);
+                assert_eq!(size, self.sizes[index] as u64);
+            }
+            self.state.lock().unwrap().objects[index].verification_reads += 1;
+        } else {
+            assert!(size <= BUFFER_SIZE as u64);
+        }
         assert!(range.offset() + size <= self.sizes[index] as u64);
+        if !destination && range.offset() >= BUFFER_SIZE as u64 {
+            if matches!(self.fault, Fault::BlockPrefetch)
+                || matches!(self.fault, Fault::FailUploadWithBlockedPrefetch)
+                    && range.offset() >= 3 * BUFFER_SIZE as u64
+            {
+                self.read_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if matches!(self.fault, Fault::RequireReadWriteOverlap)
+                && range.offset() >= 2 * BUFFER_SIZE as u64
+            {
+                self.read_started.notify_one();
+            }
+        }
         let range = range.to_content_range(self.sizes[index]).unwrap();
         if !destination {
             self.state.lock().unwrap().objects[index].reads += 1;
         }
-        let mut bytes: Vec<u8> = range
-            .clone()
-            .map(|offset| ((index + offset) % 251) as u8)
-            .collect();
-        if destination && matches!(self.fault, Fault::CorruptDestination) {
-            bytes[0] ^= 1;
-        }
-        let mut response = Self::response(StatusCode::PARTIAL_CONTENT, bytes);
+        // Generate payload frames lazily in fetch, so a verification GET can
+        // cover a large object without the fixture allocating it in full.
+        let mut response = Self::response(StatusCode::PARTIAL_CONTENT, "");
+        response.headers_mut().insert("content-length", size.into());
         let content_range = BytesContentRange::default()
             .with_range(range.start as u64, (range.end - 1) as u64)
             .with_size(self.sizes[index] as u64);
@@ -334,6 +389,13 @@ impl TestBucket {
         {
             state.failed_writes += 1;
             return Self::response(StatusCode::SERVICE_UNAVAILABLE, "");
+        }
+        if matches!(self.fault, Fault::FailUploadWithBlockedPrefetch) {
+            state.failed_writes += 1;
+            return Self::response(
+                StatusCode::FORBIDDEN,
+                "<Error><Code>AccessDenied</Code></Error>",
+            );
         }
         let object = &mut state.objects[index];
         if let Some(part) = part {
@@ -431,6 +493,9 @@ impl HttpTransport for TestBucket {
     async fn fetch(&self, request: Request<Buffer>) -> opendal::Result<Response<HttpBody>> {
         let active = ActiveRequest::new(self.state.clone());
         tokio::task::yield_now().await;
+        if !self.request_delay.is_zero() {
+            tokio::time::sleep(self.request_delay).await;
+        }
         let mut query: Vec<_> =
             form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()).collect();
         query.sort_unstable();
@@ -472,6 +537,13 @@ impl HttpTransport for TestBucket {
                     self.read_started.notify_one();
                     std::future::pending::<()>().await;
                 }
+                if matches!(
+                    self.fault,
+                    Fault::RequireReadWriteOverlap | Fault::FailUploadWithBlockedPrefetch
+                ) && *part == "1"
+                {
+                    self.read_started.notified().await;
+                }
                 self.write(
                     index.parse().unwrap(),
                     &request,
@@ -506,9 +578,82 @@ impl HttpTransport for TestBucket {
                 request.uri()
             ),
         };
+        if request.method() == Method::GET && response.status() == StatusCode::PARTIAL_CONTENT {
+            let index: usize = path[3].parse().unwrap();
+            let range: BytesRange = request.headers()["range"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let start = range.offset() as usize;
+            let size = range.size().unwrap() as usize;
+            let destination = path[1] == "destination";
+            let end = start + size
+                - usize::from(
+                    destination && matches!(self.fault, Fault::TruncatedVerificationBody),
+                );
+            let block = destination && matches!(self.fault, Fault::BlockVerificationBody);
+            let read_started = self.read_started.clone();
+            let fail_body_once = destination && matches!(self.fault, Fault::RetryVerificationBody);
+            let body_state = self.state.clone();
+            let corrupt =
+                path[1] == "destination" && matches!(self.fault, Fault::CorruptDestination);
+            let backing_ratio = self.frame_backing_ratio;
+            let chunks = stream::unfold(start, move |offset| {
+                let read_started = read_started.clone();
+                let body_state = body_state.clone();
+                async move {
+                    if offset == end {
+                        return None;
+                    }
+                    if block && offset > start {
+                        read_started.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    if fail_body_once && offset > start {
+                        let mut state = body_state.lock().unwrap();
+                        if state.failed_reads == 0 {
+                            state.failed_reads += 1;
+                            return Some((
+                                Err(opendal::Error::new(
+                                    opendal::ErrorKind::Unexpected,
+                                    "injected body failure",
+                                )
+                                .set_temporary()),
+                                offset,
+                            ));
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                    let len = (end - offset).min(64 * 1024);
+                    let mut bytes = vec![0xa5; len * backing_ratio];
+                    for (i, byte) in bytes[..len].iter_mut().enumerate() {
+                        *byte = ((index + offset + i) % 251) as u8;
+                    }
+                    if corrupt && offset == start {
+                        bytes[0] ^= 1;
+                    }
+                    let buffer = Buffer::from(bytes).slice(..len);
+                    Some((Ok(buffer), offset + len))
+                }
+            })
+            .map(move |chunk| {
+                let _ = &active;
+                chunk
+            });
+            let (parts, _) = response.into_parts();
+            return Ok(Response::from_parts(
+                parts,
+                HttpBody::new(Box::pin(chunks), Some(size as u64)),
+            ));
+        }
         let (parts, body) = response.into_parts();
         let size = body.len() as u64;
-        let body = stream::iter([Ok(body)]).map(move |chunk| {
+        let chunks: Vec<_> = (0..body.len())
+            .step_by(64 * 1024)
+            .map(|offset| Ok(body.slice(offset..(offset + 64 * 1024).min(body.len()))))
+            .collect();
+        let body = stream::iter(chunks).map(move |chunk| {
             let _ = &active;
             chunk
         });

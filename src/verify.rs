@@ -1,8 +1,8 @@
+use futures_util::TryStreamExt;
 use opendal::{Metadata, Operator};
 use sha2::{Digest, Sha256};
 
 use crate::common::Sha256Digest;
-use crate::config::COPY_BUFFER_SIZE;
 use crate::validation::validate_destination;
 use crate::{CancellationToken, Error, Result};
 
@@ -19,18 +19,20 @@ pub(crate) async fn verify_object(
         result = async {
             let metadata = destination.stat(path).await?;
             let etag = validate_destination(source, &metadata, path)?;
-            let reader = destination.reader_with(path).if_match(etag).chunk(COPY_BUFFER_SIZE).concurrent(1).await?;
+            // Without `chunk`, OpenDAL streams one conditional GET instead of
+            // collecting a separate response for every multipart-sized range.
+            let reader = destination.reader_with(path).if_match(etag).await?;
+            let mut stream = reader.into_stream(0..metadata.content_length()).await?;
             let mut hash = Sha256::new();
             let mut offset = 0;
-            while offset < metadata.content_length() {
-                let end = (offset + COPY_BUFFER_SIZE as u64).min(metadata.content_length());
-                let buffer = reader.read(offset..end).await?;
-                if buffer.len() as u64 != end - offset {
+            while let Some(buffer) = stream.try_next().await? {
+                if buffer.len() as u64 > metadata.content_length() - offset {
                     return Err(Error::VerificationFailed(path.into()));
                 }
+                offset += buffer.len() as u64;
                 for chunk in buffer { hash.update(chunk); }
-                offset = end;
             }
+            if offset != metadata.content_length() { return Err(Error::VerificationFailed(path.into())); }
             let actual: Sha256Digest = hash.finalize().into();
             if actual != expected { return Err(Error::VerificationFailed(path.into())); }
             Ok(())
